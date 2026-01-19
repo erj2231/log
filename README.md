@@ -2,3 +2,61 @@
 just separate repository for thinking and writing down ideas and new things throughout journey
 
 first commitment on 11.11.2025 - buckle up
+
+# day 43 or so
+yeah i forgot about all these days. but ive learned a lot - first of all - ive completed 2 projects on my own where i debunked softmax, graphs etc. for superficial use. however then ive faced a new problem - not understanding what they meant. and ive dived into it:
+
+import math
+dataset = [
+    [0.1, 0.8, 1.0],
+    [0.9, 0.2, 0.1],
+    [0.2, 0.9, 0.7]
+]
+weights = [[0.5, 0.9, 0.1], [0.9, 0.2, 0.1]]
+target = [
+    [1, 0],
+    [0, 1],
+    [1, 0]
+]
+lr = 0.1
+
+def inference(dataset, matrix):
+    logits = []
+    for row in matrix:
+        score = sum(v * w for v, w in zip(dataset, row))
+        logits.append(score)
+    return logits
+
+def softmax(logits):
+    exps = [math.exp(l) for l in logits]
+    sum_exps = sum(exps)
+    return [e / sum_exps for e in exps]
+
+def cross_entropy(probs, real):
+    loss = 0
+    for p, r in zip(probs, real):
+        if r == 1:
+            loss = -math.log(p)
+    return loss
+
+for epoch in range(200):
+    epoch_loss = 0
+    for i in range(len(dataset)): 
+        game = dataset[i]
+        targetin = target[i]   
+        logits = inference(game, weights)
+        probs = softmax(logits)
+        loss = cross_entropy(probs, targetin)
+        epoch_loss += loss
+        for row in range(len(weights)):
+            for col in range(len(weights[row])):
+                grad = (probs[row] - targetin[row]) * game[col]
+                weights[row][col] -= lr * grad
+        if epoch % 50 == 0:
+            print(f"step: {epoch}, game = {i}, avgloss = {epoch_loss / len(dataset)}, loss = {loss}, probs = {probs}, weights = {weights}")
+            new_game = [0.1, 0.9, 0.8]
+            prediction = softmax(inference(new_game, weights))
+            print(f"Новая игра: Хит: {prediction[0]:.2%}, Провал: {prediction[1]:.2%}")
+
+here ive done what all other models do - matrix calculations, softmax, cross-entropy and finally weight changing by gradient. but lets talk about details: 1. dataset obviously can contain any number of vectors but they must be the same as weights 2. they we are taking weights and vectors and multiplying them (in this case without bias) but by its nature it is linear equation (kx + b), we append. we take those logits, exp them (we blow them bigger for our model to be more confident and be able to choose one or another) and take the ratio (e / sum(exps)). we take the ratio (probabilities lets say) and -log them (this is loss - difference between our probs and target (but reversed as we need to "go down the hill" and lower errors rather than make them bigger). taking into account all of these, we go through every weight (in this case every instance of weights and weight in it) and calculate grad ((P - T) * X, tho i do know that this formula is much more complex and involves ratios of L / P, P / z, z / w but its better to keep it simple). than we - learning rate (essentially, how much of the gradient we believe) * gradient itself (AND HERE AGAIN - AS GRADIENT IS LINEAR FUNCTION, BY ITS NATURE IT IS A LINE, LINE SEPARATING HIT AND FAILURE, THAT IS BY * LEARNING RATE WE SAY: "I BELIEVE 10% OF THIS LINE" AND FROM ALREADY EXISTING LINE (WEIGHTS) WE - GRADIENT, MAKING MUCH MORE STABLE LINE (abstract example)). well thats it for today. we'll see what is next.
+
