@@ -102,3 +102,42 @@ print(f"Новая игра: Хит {final_probs[0]:.2%}, Провал {final_pr
 
 here ive added "secret" layer (16 kinda neurons) aside from final 8 weights. obviously i had to change the way how final layers (and their probabilities) went back to vectors (ive made that last layers changed their weights the same way (weights_loss) but * not on vectors but neurons output (logits) and neurons by modified gradient of final layer * relu * vectors). well thats it for right now. this is not tree, idk how to call it, but i would call: expanded linear function with nonlinearty.
 
+# day 44 
+today ive made a little changes with bias as independent variable and added momentum:
+
+import math, random
+dataset = [[0.1, 0.8, 1.0], [0.9, 0.2, 0.1], [0.2, 0.9, 0.7]]
+target = [[1, 0], [0, 1], [1, 0]]
+lr = 0.02
+mucoef = 0.9
+neurons = [[random.uniform(-0.1, 0.1) for _ in range(3)] for _ in range(4)]
+n_bias = [0.0] * 4
+weights = [[random.uniform(-0.1, 0.1) for _ in range(4)] for _ in range(2)]
+w_bias = [0.0] * 2
+mu_n = [[0.0]*3 for _ in range(4)]
+mu_w = [[0.0]*4 for _ in range(2)]
+
+for epoch in range(500):
+    for i in range(len(dataset)):
+        vectors = dataset[i]
+        n_logits = [max(0, sum(v * w for v, w in zip(vectors, row)) + n_bias[idx]) for idx, row in enumerate(neurons)]
+        logits = [sum(v * w for v, w in zip(n_logits, row)) + w_bias[idx] for idx, row in enumerate(weights)]
+        probs = [math.exp(l) / sum(math.exp(x) for x in logits) for l in logits]
+        w_loss = [probs[j] - target[i][j] for j in range(2)]
+        n_loss = [sum(w_loss[k] * weights[k][j] for k in range(2)) * (1 if n_logits[j] > 0 else 0) for j in range(4)]
+        for j in range(2):
+            for k in range(4):
+                grad = w_loss[j] * n_logits[k]
+                mu_w[j][k] = mucoef * mu_w[j][k] + grad
+                weights[j][k] -= lr * mu_w[j][k]
+            w_bias[j] -= lr * w_loss[j] 
+        for j in range(4):
+            for k in range(3):
+                grad = n_loss[j] * vectors[k]
+                mu_n[j][k] = mucoef * mu_n[j][k] + grad
+                neurons[j][k] -= lr * mu_n[j][k]
+            n_bias[j] -= lr * n_loss[j]
+print("Обучение с моментумом завершено!")
+
+here well almost everythings the same i just took bias out of dataset and well made that weights -= not gradient * learning rate but momentum (first of weights then neurons with formula: mucoef (0.9 in this case) * list of momentums + gradient). thats it.
+
