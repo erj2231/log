@@ -1,0 +1,102 @@
+I spent the first 40+ days building projects, but I realized I was using Softmax and Graphs superficially. Today, I dived into what they actually mean.
+
+### Phase 1: The Linear Base
+I started with matrix calculations. By nature, these are linear equations ($kx + b$). We take logits, pass them through `exp()` to "blow them up" (increasing model confidence), and then calculate the ratio to get probabilities.
+
+### Phase 2: The "Secret" Layer
+I added a hidden layer of 4 neurons. This isn't just a "tree"; it's an **Expanded Linear Function with Non-linearity**.
+
+### Key Insights:
+1. **Gradient as a Line:** A gradient is essentially a line separating "Hit" from "Failure." By multiplying it by a Learning Rate, I’m saying: *"I trust 10% of this new line."*
+2. **Backpropagation:** I had to change how the error flows. The final layer weights change based on the neurons' output, while the neurons change based on the final layer's error multiplied by the ReLU derivative.
+
+### Phase 1 Code:
+import math
+dataset = [
+    [0.1, 0.8, 1.0, 1.0],
+    [0.9, 0.2, 0.1, 1.0],
+    [0.2, 0.9, 0.7, 1.0]
+]
+weights = [[0.5, 0.9, 0.1, 0.0], [0.9, 0.2, 0.1, 0.0]]
+target = [
+    [1, 0],
+    [0, 1],
+    [1, 0]
+]
+lr = 0.1
+
+def inference(dataset, matrix):
+    logits = []
+    for row in matrix:
+        score = sum(v * w for v, w in zip(dataset, row))
+        logits.append(score)
+    return logits
+
+def softmax(logits):
+    exps = [math.exp(l) for l in logits]
+    sum_exps = sum(exps)
+    return [e / sum_exps for e in exps]
+
+def cross_entropy(probs, real):
+    loss = 0
+    for p, r in zip(probs, real):
+        if r == 1:
+            loss = -math.log(p)
+    return loss
+
+for epoch in range(200):
+    epoch_loss = 0
+    for i in range(len(dataset)): 
+        game = dataset[i]
+        targetin = target[i]   
+        logits = inference(game, weights)
+        probs = softmax(logits)
+        loss = cross_entropy(probs, targetin)
+        epoch_loss += loss
+        for row in range(len(weights)):
+            for col in range(len(weights[row])):
+                grad = (probs[row] - targetin[row]) * game[col]
+                weights[row][col] -= lr * grad
+        if epoch % 50 == 0:
+            print(f"step: {epoch}, game = {i}, avgloss = {epoch_loss / len(dataset)}, loss = {loss}, probs = {probs}, weights = {weights}")
+            new_game = [0.1, 0.9, 0.8]
+            prediction = softmax(inference(new_game, weights))
+            print(f"Новая игра: Хит: {prediction[0]:.2%}, Провал: {prediction[1]:.2%}")
+
+### Phase 2 Code:
+import math
+import random
+dataset = [[0.1, 0.8, 1.0, 1.0], [0.9, 0.2, 0.1, 1.0], [0.2, 0.9, 0.7, 1.0]]
+target = [[1, 0], [0, 1], [1, 0]]
+lr = 0.05
+neurons = [[random.uniform(-0.1, 0.1) for _ in range(4)] for _ in range(4)]
+finals = [[random.uniform(-0.1, 0.1) for _ in range(4)] for _ in range(2)]
+def relu(x): return max(0, x)
+def relu_deriv(x): return 1 if x > 0 else 0 
+
+for epoch in range(500):
+    total_loss = 0
+    for i in range(len(dataset)):
+        vectors = dataset[i]
+        neurons_logits = [relu(sum(v * w for v, w in zip(vectors, row))) for row in neurons]
+        logits = [sum(v * w for v, w in zip(neurons_logits, row)) for row in finals]
+        probs = [math.exp(l) / sum(math.exp(x) for x in logits) for l in logits]
+        weights_loss = [probs[j] - target[i][j] for j in range(2)]
+        neurons_loss = [0.0] * 4
+        for j in range(4):
+            error = sum(weights_loss[k] * finals[k][j] for k in range(2))
+            neurons_loss[j] = error * relu_deriv(neurons_logits[j])
+        for j in range(2):
+            for k in range(4):
+                finals[j][k] -= lr * weights_loss[j] * neurons_logits[k]      
+        for j in range(4):
+            for k in range(4):
+                neurons[j][k] -= lr * neurons_loss[j] * vectors[k]
+    if epoch % 100 == 0:
+        print(f"Epoch {epoch} завершена")
+
+test_game = [0.1, 0.9, 0.8, 1.0]
+l1 = [relu(sum(v * w for v, w in zip(test_game, row))) for row in neurons]
+l2 = [sum(v * w for v, w in zip(l1, row)) for row in finals]
+final_probs = [math.exp(l) / sum(math.exp(x) for x in l2) for l in l2]
+print(f"Новая игра: Хит {final_probs[0]:.2%}, Провал {final_probs[1]:.2%}")
