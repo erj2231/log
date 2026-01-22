@@ -141,3 +141,119 @@ print("Обучение с моментумом завершено!")
 
 here well almost everythings the same i just took bias out of dataset and well made that weights -= not gradient * learning rate but momentum (first of weights then neurons with formula: mucoef (0.9 in this case) * list of momentums + gradient). thats it.
 
+# day 46
+I've pushed the boundaries of my models, making it a "hardcore" optimizer by combining almost everything used in production models. I also compared it with traditional ML methods like KNN, Decision Trees, and SVM to see the difference between "probabilistic thinking" and "distance thinking":
+
+import math, random
+dataset = [[0.1, 0.8, 1.0], [0.9, 0.2, 0.1], [0.2, 0.9, 0.7]]
+target = [[1, 0], [0, 1], [1, 0]]
+lr = 0.02
+mucoef = 0.9
+l1_param = 0.005
+l2_param = 0.01
+neurons = [[random.uniform(-0.1, 0.1) for _ in range(3)] for _ in range(4)]
+n_bias = [0.0] * 4
+weights = [[random.uniform(-0.1, 0.1) for _ in range(4)] for _ in range(2)]
+w_bias = [0.0] * 2
+m = 2.0
+mu_n = [[0.0]*3 for _ in range(4)]
+mu_w = [[0.0]*4 for _ in range(2)]
+
+for epoch in range(500):
+    for i in range(len(dataset)):
+        vectors = dataset[i]
+        n_logits = [max(0, sum(v * w for v, w in zip(vectors, row)) + n_bias[idx]) for idx, row in enumerate(neurons)]
+        logits = [sum(v * w for v, w in zip(n_logits, row)) + w_bias[idx] for idx, row in enumerate(weights)]
+        logits = logits[target[i].index(1)] = logits[target[i].index(1)] / m
+        probs = [math.exp(l) / sum(math.exp(x) for x in logits) for l in logits]
+        w_loss = [probs[j] - target[i][j] for j in range(2)]
+        n_loss = [sum(w_loss[k] * weights[k][j] for k in range(2)) * (1 if n_logits[j] > 0 else 0) for j in range(4)]
+        for j in range(2):
+            for k in range(4):
+                grad = w_loss[j] * n_logits[k]
+                l2 = l2_param * weights[j][k] + l1_param * (1 if weights[j][k] > 0 else -1)
+                mu_w[j][k] = mucoef * mu_w[j][k] + grad + l2
+                weights[j][k] -= lr * mu_w[j][k]
+            w_bias[j] -= lr * w_loss[j] 
+        for j in range(4):
+            for k in range(3):
+                grad = n_loss[j] * vectors[k]
+                mu_n[j][k] = mucoef * mu_n[j][k] + grad
+                neurons[j][k] -= lr * mu_n[j][k]
+            n_bias[j] -= lr * n_loss[j]
+print("Обучение с моментумом завершено!")
+
+test_game = [0.1, 0.9, 0.8]
+l1 = [max(0, sum(v * w for v, w in zip(test_game, row)) + n_bias[i]) for i, row in enumerate(neurons)]
+l2 = [sum(v * w for v, w in zip(l1, row)) + w_bias[i] for i, row in enumerate(weights)]
+final_probs = [math.exp(l) / sum(math.exp(x) for x in l2) for l in l2]
+print(f"Новая игра: Хит {final_probs[0]:.2%}, Провал {final_probs[1]:.2%}")
+
+-----------------------------------------------------------------------------------------
+
+old_games = [
+    [0.1, 0.8, 0.1],
+    [0.9, 0.9, 0.9], 
+    [0.8, 0.2, 0.5],
+]
+results = [0, 0, 1]
+
+def knn_predict(new_data, dataset, targets, k=3):
+    distances = []
+    for i in range(len(dataset)):
+        dist = sum((new_data[j] - dataset[i][j])**2 for j in range(len(new_data)))**0.5
+        distances.append((dist, targets[i]))
+    distances.sort(key=lambda x: x[0])
+    nearest = [d[1] for d in distances[:k]]
+    return "Хит" if max(set(nearest), key=nearest.count) == 0 else "Провал"
+
+test_game = [0.15, 0.85, 0.12]
+print(f"Вердикт KNN: {knn_predict(test_game, old_games, results, k=1)}")
+
+-----------------------------------------------------------------------------------------
+
+def tree_predict(game):
+    if game[1] > 0.8:
+        if game[0] < 0.3: return "Инди-хит"
+        else: return "Блокбастер"
+    else: return "Провал"
+
+new_game = [0.1, 0.9, 0.5]
+print(f"Вердикт дерева: {tree_predict(new_game)}")
+
+-----------------------------------------------------------------------------------------
+
+import random
+dataset = [[0.1, 0.8, 0.1], [0.9, 0.9, 0.9], [0.8, 0.2, 0.5]]
+targets = [1, 1, -1] 
+weights = [random.uniform(-0.1, 0.1) for _ in range(3)]
+bias = 0.0
+lr = 0.02
+C = 1.0
+epochs = 1000
+l1_param = 0.005
+l2_param = 0.01
+
+for epoch in range(epochs):
+    for i, x in enumerate(dataset):
+        condition = targets[i] * (sum(x[j] * weights[j] for j in range(3)) + bias)
+        if condition >= 1:
+            for j in range(3):
+                weights[j] -= lr * (l2_param * weights[j] + l1_param * (1 if weights[j] > 0 else -1))
+        else:
+            for j in range(3):
+                weights[j] -= lr * (l2_param * weights[j] - C * x[j] * targets[i])
+            bias += lr * C * targets[i]
+
+test_game = [0.15, 0.85, 0.12]
+result = sum(test_game[j] * weights[j] for j in range(3)) + bias
+print(f"SVM вердикт: {'Хит' if result > 0 else 'Провал'} (Счет: {result:.2f})")
+
+def sigmoid(z):
+    return 1 / (1 + math.exp(-z))
+prob_hit = sigmoid(result)
+
+-----------------------------------------------------------------------------------------
+
+OVERVIEW: first i will explain my linear model (that ive changed third time already): except for momentum and bias i also added regularization (like in cvm: they essenentially are just a way to control (diminish) weights through lambda * weights - l2 is more mild (granual control) while l1 is constant and cuts off unnecessary entirely), and of course large margin (i was inspired by it again by svm) - during the logits phase (before probs) i substracted right logits thus deceiving the model to work twice as harder. Aside from linear model: i tried to make knn (but it was relatively easy as simple knn only requires dict), decision tree (again quite easy cuz i didnt make complex one yet) and svm (the hardest among them - the principle behind svm is geometric distances - that is it always use hinge lose (simplified version of large margin with if else loop whether the distance between targets and logits is more than one and they are separated (if they are aligned or distance < 1 - we add loss (targets * x * C - counteract of lambda). and also: as svm gives a 'score' not probs - we have to manually turn it into probs by sigmoid (the same formula of P = ez / sum(ez) but modified into P = 1 / z + e-z. Also i want to what i found out in theory: 1. log and exp and defined through first better version of gradient descent (where we not only * gradient but also instead of using lr / modified w - thus gaining better control "over the hill") and second through iterations where 1 e2 /4 e3 / 6 etc. 2. e itself works like a powerer stronger and stronger as we go up from 0, log works like a diminisher for big numbers but powerer for small ones (the closer we are to 0 the bigger the number becomes and vice versa), epsilon - just not to / 0, lambda - always pulls down to 0 but the closer to 0 the weaker the force. 3. gradient itself is like a selfreflection: loss (how much is this pain) * activation (what will i do with it / am i ready to do smth) * X (who gave me this pain). 4. condition in svm is like "are you on my side or not" while loss is like "did i (model) understood the assignment right". for today that's it.
+
