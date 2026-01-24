@@ -1,0 +1,75 @@
+Goal: to improve linear model once again
+
+Insight: regularization whihc i used here is actually just a way to control (lower) weights for them
+to not explode (l1 is stricter - it cuts off everything despite their absolute value and l2 is milder
+- the closer to 0 the less it affects it)
+
+Action: ive added regularization (which i looked up from svm)
+
+import math
+import random
+
+dataset = [[0.1, 0.8, 1.0], [0.9, 0.2, 0.1], [0.2, 0.9, 0.7]]
+target = [[1, 0], [0, 1], [1, 0]]
+
+lr = 0.02
+mu_coef = 0.9       
+l1_param = 0.005    
+l2_param = 0.01     
+margin = 2.0      
+
+neurons = [[random.uniform(-0.1, 0.1) for _ in range(3)] for _ in range(4)]
+n_bias = [0.0] * 4
+mu_n = [[0.0] * 3 for _ in range(4)] # Momentum for hidden layer
+weights = [[random.uniform(-0.1, 0.1) for _ in range(4)] for _ in range(2)]
+w_bias = [0.0] * 2
+mu_w = [[0.0] * 4 for _ in range(2)] # Momentum for output layer
+
+for epoch in range(500):
+    for i in range(len(dataset)):
+        x = dataset[i]
+        t = target[i]
+
+        n_logits = []
+        for row, b in zip(neurons, n_bias):
+            z = sum(v * w for v, w in zip(x, row)) + b
+            n_logits.append(max(0, z))
+
+        logits = []
+        for row, b in zip(weights, w_bias):
+            z = sum(v * w for v, w in zip(n_logits, row)) + b
+            logits.append(z)
+
+        correct_idx = t.index(1)
+        logits[correct_idx] /= margin
+        exps = [math.exp(l) for l in logits]
+        sum_exps = sum(exps)
+        probs = [e / sum_exps for e in exps]
+
+        w_loss = [probs[j] - t[j] for j in range(2)]
+        for j in range(2):
+            for k in range(4):
+                grad = w_loss[j] * n_logits[k]
+                reg = (l2_param * weights[j][k]) + (l1_param * (1 if weights[j][k] > 0 else -1))
+                
+                mu_w[j][k] = mu_coef * mu_w[j][k] + grad + reg
+                weights[j][k] -= lr * mu_w[j][k]
+            w_bias[j] -= lr * w_loss[j]
+
+        for j in range(4):
+            error = sum(w_loss[k] * weights[k][j] for k in range(2))
+            n_loss_j = error * (1 if n_logits[j] > 0 else 0)
+            
+            for k in range(3):
+                grad = n_loss_j * x[k]
+                mu_n[j][k] = mu_coef * mu_n[j][k] + grad
+                neurons[j][k] -= lr * mu_n[j][k]
+            n_bias[j] -= lr * n_loss_j
+
+print("Обучение с моментумом и регуляризацией завершено!")
+test_game = [0.1, 0.9, 0.8]
+l1 = [max(0, sum(v * w for v, w in zip(test_game, row)) + b) for row, b in zip(neurons, n_bias)]
+l2 = [sum(v * w for v, w in zip(l1, row)) + b for row, b in zip(weights, w_bias)]
+final_exps = [math.exp(z) for z in l2]
+final_probs = [e / sum(final_exps) for e in final_exps]
+print(f"Новая игра: Хит {final_probs[0]:.2%}, Провал {final_probs[1]:.2%}")
