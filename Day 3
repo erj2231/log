@@ -1,0 +1,33 @@
+Goal: to continue making progress
+
+Previous: ive made functions and now ive made gradient (obvious) 
+
+Formulas: gradient - (P - T) * X - tho it is really simplified. i learned logits etc. in previous day
+but my understanding turned out to be not that deep:
+**Логит (Score):** $z = \sum (w_i \cdot x_i) + b$
+- **Активация (Softmax):** $P = \frac{e^z}{\sum e^z}$
+- **Ошибка (Cross-Entropy):** $L = - \sum (T \cdot \ln(P))$
+#### Цепочка производных (Chain Rule):
+1. **Производная Ошибки:** $\frac{\partial L}{\partial P} = -\frac{T}{P}$
+2. **Производная Активации:** $\frac{\partial P}{\partial z} = P(1 - P)$
+3. **Производная Логита:** $\frac{\partial z}{\partial w} = X$
+#### Итоговый Градиент (склейка всего выше):
+$$\text{Градиент} (w) = \frac{\partial L}{\partial P} \cdot \frac{\partial P}{\partial z} \cdot \frac{\partial z}{\partial w} = (P - T) \cdot X$$
+#### Шаг обучения (Gradient Descent):
+all of this is hard and needs to be be processed.
+
+for epoch in range(100):
+    total_epoch_loss = 0
+    
+    for i in range(len(dataset)):
+        x = dataset[i]
+        
+        logits = get_logits(x, weights)
+        probs = get_probs(logits)
+        loss = get_loss(probs, t)
+        
+        for row in range(len(weights)):
+            error = probs[row] - target[i]
+            for col in range(len(weights[row])):
+                gradient = error * x[col]
+                weights[row][col] -= lr * gradient
