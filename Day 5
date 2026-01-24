@@ -1,0 +1,33 @@
+Goal: to improve model for now (and study theory)
+
+The insight: bias should be introduced cuz it brings some kinda unlinearity
+
+The math: z = (w * x) + b - linear function - line separating hits and fails (P.S. we have to update
+bias too)
+
+import math, random
+
+dataset = [[0.1, 0.8], [0.5, 0.5], [0.9, 0.1]]
+target = [[1, 0], [0, 1], [1, 0]]
+lr = 0.1
+weights = [[random.uniform(-0.1, 0.1) for _ in range(2)] for _ in range(2)]
+biases = [0.0, 0.0] # One bias for each output class
+
+for epoch in range(100):
+    for i in range(len(dataset)):
+        x = dataset[i]
+        t = target[i]
+        
+        logits = []
+        for j in range(2):
+            z = sum(x[k] * weights[j][k] for k in range(2)) + biases[j]
+            logits.append(z)
+            
+        exps = [math.exp(l) for l in logits]
+        probs = [e / sum(exps) for e in exps]
+        
+        for j in range(2):
+            error = probs[j] - t[j]
+            for k in range(2):
+                weights[j][k] -= lr * error * x[k]
+            biases[j] -= lr * error

@@ -1,0 +1,17 @@
+Goal: To start learning by creating a line that separates "Hits" from "Failures" using only a raw error signal. No Softmax, no Logs.
+
+Method: If the result is positive and should be negative, move the weights.
+
+The Math: Error = Target - Output. 
+
+dataset = [[0.1, 0.8], [0.9, 0.2]]
+target = [1, 0]
+weights = [0.5, -0.5]
+lr = 0.1
+
+for epoch in range(10):
+    for i, x in enumerate(dataset):
+        prediction = 1 if sum(v * w for v, w in zip(x, weights)) > 0 else 0
+        error = target[i] - prediction
+        for j in range(len(weights)):
+            weights[j] += lr * error * x[j]

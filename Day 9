@@ -1,0 +1,46 @@
+Goal: ive kinda already made cool linear model so i tried other ones
+
+Insight: trees and knn are really simply (if else and memory)
+
+Action: ive made tree, knn and svm
+
+def tree_predict(game): 
+  if game[1] > 0.8: 
+    if game[0] < 0.3: 
+      return "Инди-хит" 
+    else:  
+      return "Блокбастер" 
+  else: 
+    return "Провал"
+new_game = [0.1, 0.9, 0.5] 
+print(f"Вердикт дерева: {tree_predict(new_game)}")
+
+
+import random 
+dataset = [[0.1, 0.8, 0.1], [0.9, 0.9, 0.9], [0.8, 0.2, 0.5]] 
+targets = [1, 1, -1] 
+weights = [random.uniform(-0.1, 0.1) for _ in range(3)] 
+bias = 0.0 
+lr = 0.02 
+C = 1.0 
+epochs = 1000 
+l1_param = 0.005 
+l2_param = 0.01
+for epoch in range(epochs): 
+for i, x in enumerate(dataset): 
+  condition = targets[i] * (sum(x[j] * weights[j] for j in range(3)) + bias) 
+  if condition >= 1: 
+    for j in range(3): 
+      weights[j] -= lr * (l2_param * weights[j] + l1_param * (1 if weights[j] > 0 else -1)) 
+  else: 
+    for j in range(3): 
+      weights[j] -= lr * (l2_param * weights[j] - C * x[j] * targets[i]) 
+  bias += lr * C * targets[i]
+
+test_game = [0.15, 0.85, 0.12] 
+result = sum(test_game[j] * weights[j] for j in range(3)) + bias 
+print(f"SVM вердикт: {'Хит' if result > 0 else 'Провал'} (Счет: {result:.2f})")
+
+def sigmoid(z): 
+  return 1 / (1 + math.exp(-z)) 
+prob_hit = sigmoid(result)

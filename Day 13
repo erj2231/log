@@ -1,0 +1,117 @@
+Goal: to progress in linear model once again (i can do nothing iwth my genius optimizer unfortunately at
+the moment(
+
+Insight: embedding is mutable dataset id say? batch is like dividing your data (on batches)
+
+Action: added embedding and batch
+
+import math, random
+
+vocab_size, embed_dim = 10, 4
+hidden_1, hidden_2 = 8, 4
+lr, l1_param, l2_param = 0.02, 0.005, 0.01
+margin, eps, mucoef, vecoef = 2.0, 1e-8, 0.9, 0.999
+
+embedding_table = [[random.uniform(-0.1, 0.1) for _ in range(embed_dim)] for _ in range(vocab_size)]
+neurons = [[random.uniform(-0.1, 0.1) for _ in range(embed_dim)] for _ in range(hidden_1)]
+layer_2 = [[random.uniform(-0.1, 0.1) for _ in range(hidden_1)] for _ in range(hidden_2)]
+weights = [[random.uniform(-0.1, 0.1) for _ in range(hidden_2)] for _ in range(2)]
+
+n_bias, l2_bias, w_bias = [0.0]*hidden_1, [0.0]*hidden_2, [0.0]*2
+
+mu_e, ve_e = [[0.0]*embed_dim for _ in range(vocab_size)], [[0.0]*embed_dim for _ in range(vocab_size)]
+mu_n, ve_n = [[0.0]*embed_dim for _ in range(hidden_1)], [[0.0]*embed_dim for _ in range(hidden_1)]
+mu_l2, ve_l2 = [[0.0]*hidden_1 for _ in range(hidden_2)], [[0.0]*hidden_1 for _ in range(hidden_2)]
+mu_w, ve_w = [[0.0]*hidden_2 for _ in range(2)], [[0.0]*hidden_2 for _ in range(2)]
+
+mu_nb, ve_nb = [0.0]*hidden_1, [0.0]*hidden_1
+mu_l2b, ve_l2b = [0.0]*hidden_2, [0.0]*hidden_2
+mu_wb, ve_wb = [0.0]*2, [0.0]*2
+dataset, target = [0, 1, 2, 3, 4], [[1, 0], [0, 1], [1, 0], [0, 1], [1, 0]]
+
+batch_size = 3
+acc_w = [[0.0]*hidden_2 for _ in range(2)]; acc_wb = [0.0]*2
+acc_l2 = [[0.0]*hidden_1 for _ in range(hidden_2)]; acc_l2b = [0.0]*hidden_2
+acc_n = [[0.0]*embed_dim for _ in range(hidden_1)]; acc_nb = [0.0]*hidden_1
+acc_e = [[0.0]*embed_dim for _ in range(vocab_size)]
+
+t = 0
+
+for epoch in range(500):
+    data_indices = list(range(len(dataset)))
+    random.shuffle(data_indices)
+    for batch, i in enumerate(data_indices):
+        emb_idx = dataset[i]
+        vectors = embedding_table[emb_idx]
+
+        n_logits = [max(0, sum(v * w for v, w in zip(vectors, row)) + n_bias[idx]) for idx, row in enumerate(neurons)]
+        l2_logits = [max(0, sum(v * w for v, w in zip(n_logits, row)) + l2_bias[idx]) for idx, row in enumerate(layer_2)]
+        logits = [sum(v * w for v, w in zip(l2_logits, row)) + w_bias[idx] for idx, row in enumerate(weights)]
+
+        train_logits = list(logits)
+        correct_idx = target[i].index(1)
+        train_logits[correct_idx] /= margin
+        probs = [math.exp(l) / sum(math.exp(x) for x in train_logits) for l in train_logits]
+
+        w_loss = [probs[j] - target[i][j] for j in range(2)]
+        l2_loss = [sum(w_loss[k] * weights[k][j] for k in range(2)) * (1 if l2_logits[j] > 0 else 0) for j in range(hidden_2)]
+        n_loss = [sum(l2_loss[k] * layer_2[k][j] for k in range(hidden_2)) * (1 if n_logits[j] > 0 else 0) for j in range(hidden_1)]
+        e_loss = [sum(n_loss[j] * neurons[j][k] for j in range(hidden_1)) for k in range(embed_dim)]
+
+        for j in range(2):
+            for k in range(hidden_2): acc_w[j][k] += w_loss[j] * l2_logits[k]
+            acc_wb[j] += w_loss[j]
+        for j in range(hidden_2):
+            for k in range(hidden_1): acc_l2[j][k] += l2_loss[j] * n_logits[k]
+            acc_l2b[j] += l2_loss[j]
+        for j in range(hidden_1):
+            for k in range(embed_dim): acc_n[j][k] += n_loss[j] * vectors[k]
+            acc_nb[j] += n_loss[j]
+        for k in range(embed_dim): acc_e[emb_idx][k] += e_loss[k]
+
+        if (batch + 1) % batch_size == 0 or (batch + 1) == len(dataset):
+            t += 1
+            for j in range(2):
+                for k in range(hidden_2):
+                    grad = acc_w[j][k] / batch_size
+                    reg = l2_param * weights[j][k] + l1_param * (1 if weights[j][k] > 0 else -1)
+                    l2grad = grad + reg
+                    mu_w[j][k] = mucoef * mu_w[j][k] + (1 - mucoef) * l2grad
+                    ve_w[j][k] = vecoef * ve_w[j][k] + (1 - vecoef) * (l2grad**2)
+                    weights[j][k] -= lr * (mu_w[j][k]/(1-mucoef**t)) / (math.sqrt(ve_w[j][k]/(1-vecoef**t)) + eps)
+                
+                mu_wb[j] = mucoef * mu_wb[j] + (1 - mucoef) * w_loss[j]
+                ve_wb[j] = vecoef * ve_wb[j] + (1 - vecoef) * (w_loss[j]**2)
+                w_bias[j] -= lr * (mu_wb[j]/(1-mucoef**t)) / (math.sqrt(ve_wb[j]/(1-vecoef**t)) + eps)
+
+            for j in range(hidden_2):
+                for k in range(hidden_1):
+                    grad = l2_loss[j] * n_logits[k] 
+                    l2grad = grad + (l2_param * layer_2[j][k])
+                    mu_l2[j][k] = mucoef * mu_l2[j][k] + (1 - mucoef) * l2grad
+                    ve_l2[j][k] = vecoef * ve_l2[j][k] + (1 - vecoef) * (l2grad**2)
+                    layer_2[j][k] -= lr * (mu_l2[j][k]/(1-mucoef**t)) / (math.sqrt(ve_l2[j][k]/(1-vecoef**t)) + eps)
+                
+                mu_l2b[j] = mucoef * mu_l2b[j] + (1 - mucoef) * l2_loss[j]
+                ve_l2b[j] = vecoef * ve_l2b[j] + (1 - vecoef) * (l2_loss[j]**2)
+                l2_bias[j] -= lr * (mu_l2b[j]/(1-mucoef**t)) / (math.sqrt(ve_l2b[j]/(1-vecoef**t)) + eps)
+
+            for j in range(hidden_1):
+                for k in range(embed_dim):
+                    grad = n_loss[j] * vectors[k]
+                    l2grad = grad + (l2_param * neurons[j][k])
+                    mu_n[j][k] = mucoef * mu_n[j][k] + (1 - mucoef) * l2grad
+                    ve_n[j][k] = vecoef * ve_n[j][k] + (1 - vecoef) * (l2grad**2)
+                    neurons[j][k] -= lr * (mu_n[j][k]/(1-mucoef**t)) / (math.sqrt(ve_n[j][k]/(1-vecoef**t)) + eps)
+                
+                mu_nb[j] = mucoef * mu_nb[j] + (1 - mucoef) * n_loss[j]
+                ve_nb[j] = vecoef * ve_nb[j] + (1 - vecoef) * (n_loss[j]**2)
+                n_bias[j] -= lr * (mu_nb[j]/(1-mucoef**t)) / (math.sqrt(ve_nb[j]/(1-vecoef**t)) + eps)
+
+            for k in range(embed_dim):
+                grad = e_loss[k]
+                mu_e[emb_idx][k] = mucoef * mu_e[emb_idx][k] + (1 - mucoef) * grad
+                ve_e[emb_idx][k] = vecoef * ve_e[emb_idx][k] + (1 - vecoef) * (grad**2)
+                embedding_table[emb_idx][k] -= lr * (mu_e[emb_idx][k]/(1-mucoef**t)) / (math.sqrt(ve_e[emb_idx][k]/(1-vecoef**t)) + eps)
+
+print("Обучение завершено успешно!")

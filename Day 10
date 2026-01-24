@@ -1,0 +1,94 @@
+Goal: to improve linear model once again
+
+Insight: regularization whihc i used here is actually just a way to control (lower) weights for them
+to not explode (l1 is stricter - it cuts off everything despite their absolute value and l2 is milder
+- the closer to 0 the less it affects it)
+
+Action: ive added regularization (which i looked up from svm)
+
+P.S.: during the logits phase (before probs) i substracted right logits thus deceiving the model to 
+work twice as harder. Aside from linear model: i tried to make knn (but it was relatively easy as 
+simple knn only requires dict), decision tree (again quite easy cuz i didnt make complex one yet) and
+svm (the hardest among them - the principle behind svm is geometric distances - that is it always 
+use hinge lose (simplified version of large margin with if else loop whether the distance between 
+targets and logits is more than one and they are separated (if they are aligned or distance < 1 - we 
+add loss (targets * x * C - counteract of lambda). and also: as svm gives a 'score' not probs - we 
+have to manually turn it into probs by sigmoid (the same formula of P = ez / sum(ez) but modified 
+into P = 1 / z + e-z. Also i want to what i found out in theory: 1. log and exp and defined through 
+first better version of gradient descent (where we not only * gradient but also instead of using lr /
+modified w - thus gaining better control "over the hill") and second through iterations where 1 e2 /4
+e3 / 6 etc. 2. e itself works like a powerer stronger and stronger as we go up from 0, log works like
+a diminisher for big numbers but powerer for small ones (the closer we are to 0 the bigger the number
+becomes and vice versa), epsilon - just not to / 0, lambda - always pulls down to 0 but the closer to
+0 the weaker the force. 3. gradient itself is like a selfreflection: loss (how much is this pain) * 
+activation (what will i do with it / am i ready to do smth) * X (who gave me this pain). 4. condition
+in svm is like "are you on my side or not" while loss is like "did i (model) understood the assignment
+right". for today that's it.
+
+import math
+import random
+
+dataset = [[0.1, 0.8, 1.0], [0.9, 0.2, 0.1], [0.2, 0.9, 0.7]]
+target = [[1, 0], [0, 1], [1, 0]]
+
+lr = 0.02
+mu_coef = 0.9       
+l1_param = 0.005    
+l2_param = 0.01     
+margin = 2.0      
+
+neurons = [[random.uniform(-0.1, 0.1) for _ in range(3)] for _ in range(4)]
+n_bias = [0.0] * 4
+mu_n = [[0.0] * 3 for _ in range(4)] # Momentum for hidden layer
+weights = [[random.uniform(-0.1, 0.1) for _ in range(4)] for _ in range(2)]
+w_bias = [0.0] * 2
+mu_w = [[0.0] * 4 for _ in range(2)] # Momentum for output layer
+
+for epoch in range(500):
+    for i in range(len(dataset)):
+        x = dataset[i]
+        t = target[i]
+
+        n_logits = []
+        for row, b in zip(neurons, n_bias):
+            z = sum(v * w for v, w in zip(x, row)) + b
+            n_logits.append(max(0, z))
+
+        logits = []
+        for row, b in zip(weights, w_bias):
+            z = sum(v * w for v, w in zip(n_logits, row)) + b
+            logits.append(z)
+
+        correct_idx = t.index(1)
+        logits[correct_idx] /= margin
+        exps = [math.exp(l) for l in logits]
+        sum_exps = sum(exps)
+        probs = [e / sum_exps for e in exps]
+
+        w_loss = [probs[j] - t[j] for j in range(2)]
+        for j in range(2):
+            for k in range(4):
+                grad = w_loss[j] * n_logits[k]
+                reg = (l2_param * weights[j][k]) + (l1_param * (1 if weights[j][k] > 0 else -1))
+                
+                mu_w[j][k] = mu_coef * mu_w[j][k] + grad + reg
+                weights[j][k] -= lr * mu_w[j][k]
+            w_bias[j] -= lr * w_loss[j]
+
+        for j in range(4):
+            error = sum(w_loss[k] * weights[k][j] for k in range(2))
+            n_loss_j = error * (1 if n_logits[j] > 0 else 0)
+            
+            for k in range(3):
+                grad = n_loss_j * x[k]
+                mu_n[j][k] = mu_coef * mu_n[j][k] + grad
+                neurons[j][k] -= lr * mu_n[j][k]
+            n_bias[j] -= lr * n_loss_j
+
+print("Обучение с моментумом и регуляризацией завершено!")
+test_game = [0.1, 0.9, 0.8]
+l1 = [max(0, sum(v * w for v, w in zip(test_game, row)) + b) for row, b in zip(neurons, n_bias)]
+l2 = [sum(v * w for v, w in zip(l1, row)) + b for row, b in zip(weights, w_bias)]
+final_exps = [math.exp(z) for z in l2]
+final_probs = [e / sum(final_exps) for e in final_exps]
+print(f"Новая игра: Хит {final_probs[0]:.2%}, Провал {final_probs[1]:.2%}")

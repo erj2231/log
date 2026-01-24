@@ -1,0 +1,40 @@
+Goal: understand small steps.
+
+Insight: just separated the process.
+
+The Core Functions Logits: The raw "gut feeling" $z = \sum w \cdot x + b).
+
+Probs: scaling the logits.
+
+Loss: how it is far from right.
+
+import math
+dataset = [
+    [0.1, 0.8, 1.0], 
+    [0.9, 0.2, 0.1], 
+    [0.2, 0.9, 0.7]
+]
+weights = [
+    [0.5, 0.9, 0.1], # Weights for Class A (Hit)
+    [0.9, 0.2, 0.1]  # Weights for Class B (Fail)
+]
+target = [[1, 0], [0, 1], [1, 0]]
+lr = 0.1
+
+def get_logits(data_row, weight_matrix):
+    logits = []
+    for row in weight_matrix:
+        score = sum(v * w for v, w in zip(data_row, row))
+        logits.append(score)
+    return logits
+
+def get_probs(logits):
+    exps = [math.exp(l) for l in logits]
+    sum_exps = sum(exps)
+    return [e / sum_exps for e in exps]
+
+def get_loss(probs, real_target):
+    for p, r in zip(probs, real_target):
+        if r == 1:
+            return -math.log(max(p, 1e-15)) # 1e-15 is your 'Epsilon' safeguard
+    return 0

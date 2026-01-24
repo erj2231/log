@@ -1,0 +1,39 @@
+Goal: to understand the formulas and i try to but meanwhile i make new
+
+The insight: turns out exp is used as amplifier of model's certainty. oh and log is used to too simplify
+the error in this case.
+
+The math: well it just takes and makes ratio no?
+
+import math
+dataset = [[0.1, 0.8, 1.0], [0.9, 0.2, 0.1]]
+target = [[1, 0], [0, 1]]
+weights = [[0.2, 0.1, 0.3], [0.5, -0.1, 0.0]] # 2 classes
+lr = 0.1
+
+def softmax(logits):
+    exps = [math.exp(z) for z in logits]
+    total = sum(exps)
+    return [e / total for e in exps]
+
+def cross_entropy(probs, target_vec):
+    correct_class_prob = sum(p * t for p, t in zip(probs, target_vec))
+    return -math.log(correct_class_prob + 1e-15)
+
+for epoch in range(100):
+    total_loss = 0
+    for i in range(len(dataset)):
+        x = dataset[i]
+        t = target[i]
+        
+        logits = [sum(v * w for v, w in zip(x, row)) for row in weights]
+        
+        probs = softmax(logits)
+        
+        loss = cross_entropy(probs, t)
+        total_epoch_loss += loss
+        
+        for row in range(len(weights)):
+            grad_multiplier = probs[row] - t[row]
+            for col in range(len(weights[row])):
+                weights[row][col] -= lr * grad_multiplier * x[col]
