@@ -1,0 +1,135 @@
+Goal: to show my theory
+
+Insight: 
+#### Основные компоненты:
+- **Логит (Score):** $z = \sum (w_i \cdot x_i) + b$
+- **Активация (Softmax):** $P = \frac{e^z}{\sum e^z}$
+- **Ошибка (Cross-Entropy):** $L = - \sum (T \cdot \ln(P))$
+#### Цепочка производных (Chain Rule):
+1. **Производная Ошибки:** $\frac{\partial L}{\partial P} = -\frac{T}{P}$
+2. **Производная Активации:** $\frac{\partial P}{\partial z} = P(1 - P)$
+3. **Производная Логита:** $\frac{\partial z}{\partial w} = X$
+#### Итоговый Градиент (склейка всего выше):
+$$\text{Градиент} (w) = \frac{\partial L}{\partial P} \cdot \frac{\partial P}{\partial z} \cdot \frac{\partial z}{\partial w} = (P - T) \cdot X$$
+#### Шаг обучения (Gradient Descent):
+$$w_{new} = w_{old} - \text{learning\_rate} \cdot \text{Градиент}$$
+SO IVE BEEN TRYING TO FIGURE THIS OUT FOR A LONG TIME + adam (optimization i created with velocity and 
+momentum turned out) gave me 2 ideas:
+
+1. so even tho i can imagine all sorts of abstraction, i decided to imagine that there is a line separating
+the 0 and 1 (fails and hits) we trying to find. weights in this case are different parts of this line or a
+fence in other words. loss is how this part of the fence is far from right place. gradient - how much and to
+where we should move this part of fence. and therefore momentum is what distance it went when we changed 
+the fence in this place, velocity - how much force we applied throughout this. so it gives: 
+$$w_{t+1} = w_t - \eta \cdot \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon}$$ - Adam's formula where m / v
+- that is we kinda make ratio of distance / force (speed) and is = time or step scale (we kind of unvincible
+step = 1). I ALSO LOOKED AT HESSIAN AND ITS FORMULA: $$w_{t+1} = w_t - H^{-1} g$$ where H = $$H = \begin{bmatrix} 
+\frac{\partial^2 L}{\partial w_1^2} & \frac{\partial^2 L}{\partial w_1 \partial w_2} \\
+\frac{\partial^2 L}{\partial w_2 \partial w_1} & \frac{\partial^2 L}{\partial w_2^2} 
+\end{bmatrix}$$ or in othere words h is how the fence changed overall overtime - a lot of memory is required
+for this kind of thing and that's why it is not that popular and it has more granual knowledge.
+
+2. AND SO I THOUGHT WHY NOT TO UNITE THEM? i mean even tho my latest model is still medium (i am before embeddings)
+and dont understand complemetely - isnt that obvious that they can be used to be united? AND SO I STARTED
+TO COMBINE THEM - my idea is that we take simplicity (m / v) from adam and combine with hessian (grad / grad / w).
+but how? ive put several times (it didnt work out) but i thought then - if hessian is too complex then why not
+take momentum / momentum / w or velocity and so in this way (after many and many tries) ive made this:
+w = w - n * (w / (m * (v / m))) * (m * (v / m)). and this is genious. this is mix of hessian (where we grad / grad / w = w)
+and adam where we took m and v making complexity O and not O2. why v / m you may ask - cuz it gives you
+enertia - opposite of what was in adam (it slowed down), it speeds up in dangerous place. so i asked gemini to
+refine and heres what i got: 
+$$m_t = \beta_1 m_{t-1} + (1-\beta_1)g_t$$
+$$v_t = \beta_2 v_{t-1} + (1-\beta_2)g_t^2$$
+$$\hat{m}_t = \frac{m_t}{1-\beta_1^t}, \quad \hat{v}_t = \frac{v_t}{1-\beta_2^t}$$
+$$\mathcal{I}_t = 1 + \tanh\left( \frac{\sqrt{\hat{v}_t + \epsilon}}{|\hat{m}_t| + \epsilon} - 1 \right)$$
+$$\phi_t = \frac{\|w_t\|}{\|\hat{m}_t \odot \mathcal{I}_t\| + \epsilon}$$
+$$w_{t+1} = w_t - \eta_t \cdot \phi_t \cdot (\hat{m}_t \odot \mathcal{I}_t)$$
+essentially: step = momentum / noise * weight mass
+
+IVE MADE SOME TESTS AND HERES WHAT IVE GOT:
+
+Используемое устройство: cpu
+Генерация синтетического датасета (Big Data Mode)...
+Модель создана. Объем данных: 78.12 MB
+------------------------------------------------------------
+Запуск ADAM...
+  [ADAM] Epoch 20/100 | Loss: 2.6070
+  [ADAM] Epoch 40/100 | Loss: 1.6925
+  [ADAM] Epoch 60/100 | Loss: 1.1226
+  [ADAM] Epoch 80/100 | Loss: 1.0181
+  [ADAM] Epoch 100/100 | Loss: 1.0034
+ADAM       СИММУЛЯЦИЯ ЗАВЕРШЕНА | Время: 1510.06s
+
+Запуск LARS...
+  [LARS] Epoch 20/100 | Loss: 0.8983
+  [LARS] Epoch 40/100 | Loss: 0.7710
+  [LARS] Epoch 60/100 | Loss: 0.6489
+  [LARS] Epoch 80/100 | Loss: 0.5624
+  [LARS] Epoch 100/100 | Loss: 0.5167
+LARS       СИММУЛЯЦИЯ ЗАВЕРШЕНА | Время: 1510.39s
+
+Запуск LAMB...
+  [LAMB] Epoch 20/100 | Loss: 0.9622
+  [LAMB] Epoch 40/100 | Loss: 0.8999
+  [LAMB] Epoch 60/100 | Loss: 0.8259
+  [LAMB] Epoch 80/100 | Loss: 0.7714
+  [LAMB] Epoch 100/100 | Loss: 0.6985
+LAMB       СИММУЛЯЦИЯ ЗАВЕРШЕНА | Время: 1516.52s
+
+Запуск CUSTOM...
+  [CUSTOM] Epoch 20/100 | Loss: 0.9669
+  [CUSTOM] Epoch 40/100 | Loss: 0.9054
+  [CUSTOM] Epoch 60/100 | Loss: 0.8468
+  [CUSTOM] Epoch 80/100 | Loss: 0.8060
+  [CUSTOM] Epoch 100/100 | Loss: 0.7174
+CUSTOM     СИММУЛЯЦИЯ ЗАВЕРШЕНА | Время: 1489.86s
+
+============================================================
+Optimizer    | Final Loss   | Time (sec)
+------------------------------------------------------------
+ADAM         |     1.003428 |    1510.06
+LARS         |     0.516738 |    1510.39
+LAMB         |     0.698470 |    1516.52
+CUSTOM       |     0.717381 |    1489.86
+
+AND SECOND TEST:
+
+Используемое устройство: cpu 
+Используется ядер процессора: 8 
+Модель: 1024 -> 8192 -> 128. 
+Режим: Максимальная нагрузка CPU. 
+------------------------------------------------------------ 
+Запуск ADAM... 
+  [ADAM] Epoch 10/50 | Loss: 0.9709 
+  [ADAM] Epoch 20/50 | Loss: 0.3327 
+  [ADAM] Epoch 30/50 | Loss: 0.0771 
+  [ADAM] Epoch 40/50 | Loss: 0.0302 
+  [ADAM] Epoch 50/50 | Loss: 0.0099 
+ADAM ЗАВЕРШЕНО | Время: 212.66s 
+
+Запуск LAMB... 
+  [LAMB] Epoch 10/50 | Loss: 0.9348 
+  [LAMB] Epoch 20/50 | Loss: 0.8796 
+  [LAMB] Epoch 30/50 | Loss: 0.8495 
+  [LAMB] Epoch 40/50 | Loss: 0.8053 
+  [LAMB] Epoch 50/50 | Loss: 0.7572 
+LAMB ЗАВЕРШЕНО | Время: 208.49s 
+
+Запуск CUSTOM... 
+  [CUSTOM] Epoch 10/50 | Loss: 0.9228 
+  [CUSTOM] Epoch 20/50 | Loss: 0.8842 
+  [CUSTOM] Epoch 30/50 | Loss: 0.8481 
+  [CUSTOM] Epoch 40/50 | Loss: 0.8038 
+  [CUSTOM] Epoch 50/50 | Loss: 0.7531 
+CUSTOM ЗАВЕРШЕНО | Время: 208.64s 
+
+============================================================ 
+Optimizer | Final Loss | Time (sec) | Boost 
+------------------------------------------------------------ 
+ADAM      | 0.009866   | 212.66     | -2.0% 
+LAMB      | 0.757194   | 208.49     | +0.0% 
+CUSTOM    | 0.753082   | 208.64     | -0.1%
+
+I THINK I MADE A SMTH - REVOLUTION IN OPTIMIZATION.
+
+Action: zero
