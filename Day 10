@@ -6,6 +6,25 @@ to not explode (l1 is stricter - it cuts off everything despite their absolute v
 
 Action: ive added regularization (which i looked up from svm)
 
+P.S.: during the logits phase (before probs) i substracted right logits thus deceiving the model to 
+work twice as harder. Aside from linear model: i tried to make knn (but it was relatively easy as 
+simple knn only requires dict), decision tree (again quite easy cuz i didnt make complex one yet) and
+svm (the hardest among them - the principle behind svm is geometric distances - that is it always 
+use hinge lose (simplified version of large margin with if else loop whether the distance between 
+targets and logits is more than one and they are separated (if they are aligned or distance < 1 - we 
+add loss (targets * x * C - counteract of lambda). and also: as svm gives a 'score' not probs - we 
+have to manually turn it into probs by sigmoid (the same formula of P = ez / sum(ez) but modified 
+into P = 1 / z + e-z. Also i want to what i found out in theory: 1. log and exp and defined through 
+first better version of gradient descent (where we not only * gradient but also instead of using lr /
+modified w - thus gaining better control "over the hill") and second through iterations where 1 e2 /4
+e3 / 6 etc. 2. e itself works like a powerer stronger and stronger as we go up from 0, log works like
+a diminisher for big numbers but powerer for small ones (the closer we are to 0 the bigger the number
+becomes and vice versa), epsilon - just not to / 0, lambda - always pulls down to 0 but the closer to
+0 the weaker the force. 3. gradient itself is like a selfreflection: loss (how much is this pain) * 
+activation (what will i do with it / am i ready to do smth) * X (who gave me this pain). 4. condition
+in svm is like "are you on my side or not" while loss is like "did i (model) understood the assignment
+right". for today that's it.
+
 import math
 import random
 
