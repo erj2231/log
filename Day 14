@@ -1,0 +1,189 @@
+Goal: to learn new things
+
+Insight: scaling and normalization are one the same, the only difference is that one is applied before
+model and another one in it. there are different scaling ways but in models as norm are used only layer,
+batch, unit vector or rms normalizations. Why is that:
+
+$$x_{scaled} = \frac{x - x_{min}}{x_{max} - x_{min}}$$
+$$x_{log} = \ln(x + 1)$$
+$$z = \frac{x - \mu}{\sigma + \epsilon}$$
+$$x_{unit} = \frac{x}{\|x\|_2}$$
+$$x_{rms} = \frac{x}{\sqrt{\frac{1}{n} \sum x_i^2 + \epsilon}}$$
+$$\sigma(x)_i = \frac{e^{x_i}}{\sum_{j=1}^K e^{x_j}}$$
+
+THESE ARE ALL SCALING TECHNIQUIES. but throughout minmax and log we lose 'direction' that's why we dont
+use them. What else can i say about them? Well, minmax is simple ratio, softmax - e ratio, z is x - mean
+(1/n * x) / (x - mean)2 that is ordinary step (2 is 2 steps from 0), unit vector is the same but without
+means and rms is unit vector but with epsilon and sqrt. ITS ALL COOL but from here we undestand that x /
+x2 is step, while x * x2 (x3) is almost e and x/x2 (1/x) is log speed? Interesting ha?
+
+ALSO i added qkv - it was tricky, but essentially they are weights (as neurons) but they just have
+different implementation (not just passing to the next level but their own)
+
+Implementation: i added qkv as weights and (q * k / vectors2) * v. and i added mean, nv ((x - mean)2)
+and well ya.
+
+import math, random
+
+# --- 1. CONFIG ---
+vocab_size, embed_dim = 10, 4
+hidden_1, hidden_2 = 8, 4
+lr, l1_param, l2_param = 0.05, 0.001, 0.01
+margin, eps, mucoef, vecoef = 2.0, 1e-8, 0.9, 0.999
+dropout, t = 0.2, 0
+batch_size = 3  # <--- Added missing definition
+
+# Wider initialization to help gradients start moving
+embedding_table = [[random.uniform(-0.5, 0.5) for _ in range(embed_dim)] for _ in range(vocab_size)]
+Wq = [[random.uniform(-0.5, 0.5) for _ in range(embed_dim)] for _ in range(embed_dim)]
+Wk = [[random.uniform(-0.5, 0.5) for _ in range(embed_dim)] for _ in range(embed_dim)]
+Wv = [[random.uniform(-0.5, 0.5) for _ in range(embed_dim)] for _ in range(embed_dim)]
+neurons = [[random.uniform(-0.5, 0.5) for _ in range(embed_dim)] for _ in range(hidden_1)]
+layer_2 = [[random.uniform(-0.5, 0.5) for _ in range(hidden_1)] for _ in range(hidden_2)]
+weights = [[random.uniform(-0.5, 0.5) for _ in range(hidden_2)] for _ in range(2)]
+n_bias, l2_bias, w_bias = [0.1]*hidden_1, [0.1]*hidden_2, [0.1]*2 
+
+# Adam States
+def st(r, c=None): return [[0.0]*c for _ in range(r)] if c else [0.0]*r
+mu_q, ve_q = st(embed_dim, embed_dim), st(embed_dim, embed_dim)
+mu_k, ve_k = st(embed_dim, embed_dim), st(embed_dim, embed_dim)
+mu_v, ve_v = st(embed_dim, embed_dim), st(embed_dim, embed_dim)
+mu_e, ve_e = st(vocab_size, embed_dim), st(vocab_size, embed_dim)
+mu_n, ve_n = st(hidden_1, embed_dim), st(hidden_1, embed_dim)
+mu_l2, ve_l2 = st(hidden_2, hidden_1), st(hidden_2, hidden_1)
+mu_w, ve_w = st(2, hidden_2), st(2, hidden_2)
+mu_nb, ve_nb, mu_l2b, ve_l2b, mu_wb, ve_wb = st(hidden_1), st(hidden_1), st(hidden_2), st(hidden_2), st(2), st(2)
+
+dataset, target = [0, 1, 2, 3, 4], [[1, 0], [0, 1], [1, 0], [0, 1], [1, 0]]
+batch_count = 0
+
+# --- 2. TRAINING ---
+for epoch in range(500):
+    data_indices = list(range(len(dataset)))
+    random.shuffle(data_indices)
+
+    # Reset Batch Gradients
+    bq, bk, bv = st(embed_dim, embed_dim), st(embed_dim, embed_dim), st(embed_dim, embed_dim)
+    bw, bwb = st(2, hidden_2), st(2)
+    bl2, bl2b = st(hidden_2, hidden_1), st(hidden_2)
+    bn, bnb = st(hidden_1, embed_dim), st(hidden_1)
+    be = st(vocab_size, embed_dim)
+
+    for batch_idx, i in enumerate(data_indices):
+        batch_count += 1
+        emb_idx = dataset[i]
+        vecs = embedding_table[emb_idx]
+        
+        # Forward QKV
+        q_raw = [sum(vecs[k] * Wq[j][k] for k in range(embed_dim)) for j in range(embed_dim)]
+        k_raw = [sum(vecs[k] * Wk[j][k] for k in range(embed_dim)) for j in range(embed_dim)]
+        v_raw = [sum(vecs[k] * Wv[j][k] for k in range(embed_dim)) for j in range(embed_dim)]
+        score = sum(q_raw[m] * k_raw[m] for m in range(embed_dim)) / math.sqrt(embed_dim)
+        attn_out = [val * score for val in v_raw]
+
+        # Layer 1 + LayerNorm
+        n_pre = [sum(attn_out[k] * row[k] for k in range(embed_dim)) + n_bias[idx] for idx, row in enumerate(neurons)]
+        nm = sum(n_pre)/len(n_pre)
+        nv = sum((x-nm)**2 for x in n_pre)/len(n_pre)
+        n_norm = [(x-nm)/math.sqrt(nv + 1e-6) for x in n_pre]
+        n_act = [max(0, x) for x in n_norm]
+        n_mask = [1 if random.random() > dropout else 0 for _ in range(hidden_1)]
+        n_logits = [(x * m)/(1-dropout) for x, m in zip(n_act, n_mask)]
+
+        # Layer 2
+        l2_pre = [sum(n_logits[k] * row[k] for k in range(hidden_1)) + l2_bias[idx] for idx, row in enumerate(layer_2)]
+        l2_act = [max(0, x) for x in l2_pre]
+        l2_mask = [1 if random.random() > dropout else 0 for _ in range(hidden_2)]
+        l2_logits = [(x * m)/(1-dropout) for x, m in zip(l2_act, l2_mask)]
+
+        # Output
+        logits = [sum(x * w for x, w in zip(l2_logits, row)) + w_bias[idx] for idx, row in enumerate(weights)]
+        t_l = list(logits); t_l[target[i].index(1)] /= margin
+        exps = [math.exp(x) for x in t_l]; sum_exps = sum(exps)
+        probs = [x / sum_exps for x in exps]
+
+        # --- BACKWARD ---
+        err_w = [probs[j] - target[i][j] for j in range(2)]
+        err_l2 = [sum(err_w[k] * weights[k][j] for k in range(2)) * (1 if l2_pre[j] > 0 else 0) * l2_mask[j] for j in range(hidden_2)]
+        err_n = [sum(err_l2[k] * layer_2[k][j] for k in range(hidden_2)) * (1 if n_pre[j] > 0 else 0) * n_mask[j] for j in range(hidden_1)]
+        
+        # Loss back to Attention
+        err_attn = [sum(err_n[j] * neurons[j][k] for j in range(hidden_1)) for k in range(embed_dim)]
+        err_v = [val * score for val in err_attn]
+        err_score = sum(err_attn[m] * v_raw[m] for m in range(embed_dim)) / math.sqrt(embed_dim)
+        err_q = [err_score * k_raw[m] for m in range(embed_dim)]
+        err_k = [err_score * q_raw[m] for m in range(embed_dim)]
+
+        # --- ACCUMULATE ---
+        for j in range(2):
+            for k in range(hidden_2): bw[j][k] += err_w[j] * l2_logits[k]
+            bwb[j] += err_w[j]
+        for j in range(hidden_2):
+            for k in range(hidden_1): bl2[j][k] += err_l2[j] * n_logits[k]
+            bl2b[j] += err_l2[j]
+        for j in range(hidden_1):
+            for k in range(embed_dim): bn[j][k] += err_n[j] * attn_out[k]
+            bnb[j] += err_n[j]
+        for j in range(embed_dim):
+            for k in range(embed_dim):
+                bq[j][k] += err_q[j] * vecs[k]
+                bk[j][k] += err_k[j] * vecs[k]
+                bv[j][k] += err_v[j] * vecs[k]
+        
+        err_e = [sum(err_q[j]*Wq[j][k] + err_k[j]*Wk[j][k] + err_v[j]*Wv[j][k] for j in range(embed_dim)) for k in range(embed_dim)]
+        for k in range(embed_dim): be[emb_idx][k] += err_e[k]
+
+        if batch_count == batch_size or (batch_idx + 1) == len(dataset):
+            t += 1
+            def up(p, b, m, v): # Standard Weight Update
+                for j in range(len(p)):
+                    for k in range(len(p[0])):
+                        g = b[j][k] / batch_count
+                        m[j][k] = mucoef * m[j][k] + (1-mucoef) * g
+                        v[j][k] = vecoef * v[j][k] + (1-vecoef) * (g**2)
+                        p[j][k] -= lr * (m[j][k]/(1-mucoef**t)) / (math.sqrt(v[j][k]/(1-vecoef**t)) + eps)
+
+            def up_b(p, b, m, v): # Bias Update
+                for j in range(len(p)):
+                    g = b[j] / batch_count
+                    m[j] = mucoef * m[j] + (1-mucoef) * g
+                    v[j] = vecoef * v[j] + (1-vecoef) * (g**2)
+                    p[j] -= lr * (m[j]/(1-mucoef**t)) / (math.sqrt(v[j]/(1-vecoef**t)) + eps)
+
+            up(Wq, bq, mu_q, ve_q); up(Wk, bk, mu_k, ve_k); up(Wv, bv, mu_v, ve_v)
+            up(neurons, bn, mu_n, ve_n); up(layer_2, bl2, mu_l2, ve_l2); up(weights, bw, mu_w, ve_w)
+            up_b(n_bias, bnb, mu_nb, ve_nb); up_b(l2_bias, bl2b, mu_l2b, ve_l2b); up_b(w_bias, bwb, mu_wb, ve_wb)
+            
+            # Embedding Update
+            for idx in range(vocab_size):
+                for k in range(embed_dim):
+                    g_e = be[idx][k] / batch_count
+                    mu_e[idx][k] = mucoef * mu_e[idx][k] + (1-mucoef) * g_e
+                    ve_e[idx][k] = vecoef * ve_e[idx][k] + (1-vecoef) * (g_e**2)
+                    embedding_table[idx][k] -= lr * (mu_e[idx][k]/(1-mucoef**t)) / (math.sqrt(ve_e[idx][k]/(1-vecoef**t)) + eps)
+
+            # Reset Gradients
+            bq, bk, bv = st(embed_dim, embed_dim), st(embed_dim, embed_dim), st(embed_dim, embed_dim)
+            bw, bwb = st(2, hidden_2), st(2); bl2, bl2b = st(hidden_2, hidden_1), st(hidden_2)
+            bn, bnb = st(hidden_1, embed_dim), st(hidden_1); be = st(vocab_size, embed_dim)
+            batch_count = 0
+
+# --- 3. TESTING ---
+print("\n--- Final Attention Model Results ---")
+for i in range(len(dataset)):
+    v_raw_test = [sum(embedding_table[dataset[i]][k] * Wv[j][k] for k in range(embed_dim)) for j in range(embed_dim)]
+    q_test = [sum(embedding_table[dataset[i]][k] * Wq[j][k] for k in range(embed_dim)) for j in range(embed_dim)]
+    k_test = [sum(embedding_table[dataset[i]][k] * Wk[j][k] for k in range(embed_dim)) for j in range(embed_dim)]
+    score_test = sum(q_test[m] * k_test[m] for m in range(embed_dim)) / math.sqrt(embed_dim)
+    attn_test = [val * score_test for val in v_raw_test]
+    
+    n_p = [sum(attn_test[k] * row[k] for k in range(embed_dim)) + n_bias[idx] for idx, row in enumerate(neurons)]
+    n_m = sum(n_p)/len(n_p); n_v = sum((x-n_m)**2 for x in n_p)/len(n_p)
+    n_n = [(x-n_m)/math.sqrt(n_v + 1e-6) for x in n_p]
+    n_a = [max(0, x) for x in n_n]
+    
+    l2_p = [sum(n_a[k] * row[k] for k in range(hidden_1)) + l2_bias[idx] for idx, row in enumerate(layer_2)]
+    l2_a = [max(0, x) for x in l2_p]
+    out = [sum(x * w for x, w in zip(l2_a, row)) + w_bias[idx] for idx, row in enumerate(weights)]
+    probs = [round(math.exp(x)/sum(math.exp(y) for y in out), 3) for x in out]
+    print(f"Index {dataset[i]} | Probs: {probs}")
