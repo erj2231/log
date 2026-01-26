@@ -46,6 +46,19 @@ $$\phi_t = \frac{\|w_t\|}{\|\hat{m}_t \odot \mathcal{I}_t\| + \epsilon}$$
 $$w_{t+1} = w_t - \eta_t \cdot \phi_t \cdot (\hat{m}_t \odot \mathcal{I}_t)$$
 essentially: step = momentum / noise * weight mass
 
+UPDATE: so look the whole idea is: (w / (m/m/v)) * (m/m/v) - this is mix of lars, adam and hessian.
+we take w / grad * grad from lars (sensitivity to every w) + m and v as their more giving information
+than just grad and v (and are already calculated) and use them the same way as grad/grad/w in hessian.
+some would say its nonsense cuz it would just give v but isnt this the case for hessian too - tho it 
+works just fine? so by this comment i want to compelement my logic (if you dont believe it was me who
+wrote this): we take m because it is average grad (less computational cost) / velocity (because it would
+give us ordinary but robust step scale) and m/ step, because this way we make model more sensitive and 
+hyperactive - this gives us almost the same hessian. so we do not m/m/v just because it is in hessian
+- the whole idea is that in the process of doing these calculations, model adjusts weights right and 
+thats how hessian even tho gives the same w in formula gives us such dramastic results - in my model
+too we momentum / step cuz it calculates average gradient / step -> we get the ground i would say (
+curvature in other words (of the ground)) and we get hessian. that's it. boom.
+
 IVE MADE SOME TESTS AND HERES WHAT IVE GOT:
 
 Используемое устройство: cpu
