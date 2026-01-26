@@ -1,0 +1,102 @@
+Goal: to improve my handmade model
+
+Insight: so 1. we can manipulate weights to get different sorts of info: positional (if we w1 + w2),
+relativeness (if we w3 * w2 / (w1)2) etc. 2. we can divide vectors into 2 parts thus making 'heads' - 
+multihead model 3. we should always make functions (cuz they can be reused), dictionaries (if they can
+contain similar info) and use ; , or : cuz it saves space.
+
+Implementation: i added multihead, positional and little changes
+
+import math, random
+
+# --- 1. SETUP ---
+vocab, embed, hid, heads, t = 10, 4, 8, 2, 0
+lr, margin, mu, ve, eps = 0.02, 2.0, 0.9, 0.999, 1e-8
+h_dim = embed // heads
+
+def rand_m(r, c=None): return [[random.uniform(-0.5, 0.5) for _ in range(c)] for _ in range(r)] if c else [0.1]*r
+def st(r, c=None): return [[0.0]*c for _ in range(r)] if c else [0.0]*r
+
+weights = {k: rand_m(*v) for k, v in {'E':(vocab, embed), 'Pos':(10, embed), 'Wq':(embed, embed), 'Wk':(embed, embed), 'Wv':(embed, embed), 'W1':(hid, embed), 'Wout':(2, hid)}.items()}
+weights.update({'B1': rand_m(hid), 'Bout': rand_m(2)})
+adam_m = {k: st(len(v), len(v[0]) if isinstance(v[0], list) else None) for k, v in weights.items()}
+adam_v = {k: st(len(v), len(v[0]) if isinstance(v[0], list) else None) for k, v in weights.items()}
+
+# --- 2. THE ENGINE ---
+def run_step(idx, target=None, update=False):
+    global t
+    # Forward: Positional Encoding + Multi-Head Attention
+    vecs = [[weights['E'][i][j] + weights['Pos'][p][j] for j in range(embed)] for p, i in enumerate(idx)]
+    h_outs, h_data = [], []
+    for h in range(heads):
+        s, e = h*h_dim, (h+1)*h_dim
+        qs = [[sum(v[k]*weights['Wq'][s+j][k] for k in range(embed)) for j in range(h_dim)] for v in vecs]
+        ks = [[sum(v[k]*weights['Wk'][s+j][k] for k in range(embed)) for j in range(h_dim)] for v in vecs]
+        vs = [[sum(v[k]*weights['Wv'][s+j][k] for k in range(embed)) for j in range(h_dim)] for v in vecs]
+        # Attention
+        sc = [sum(qs[0][m]*ks[i][m] for m in range(h_dim))/math.sqrt(h_dim) for i in range(len(idx))]
+        mv = max(sc); exps = [math.exp(x-mv) for x in sc]; attn = [x/sum(exps) for x in exps]
+        ctx = [sum(attn[i]*vs[i][j] for i in range(len(idx))) for j in range(h_dim)]
+        h_outs.extend(ctx); h_data.append((qs, ks, vs, attn))
+
+    # Forward: Feed-Forward
+    mu_l = sum(h_outs)/embed; var = sum((x-mu_l)**2 for x in h_outs)/embed
+    ln = [(x-mu_l)/math.sqrt(var+1e-6) for x in h_outs]
+    h_pre = [sum(ln[k]*weights['W1'][i][k] for k in range(embed)) + weights['B1'][i] for i in range(hid)]
+    h_act = [max(0, x) for x in h_pre]
+    logits = [sum(h_act[k]*weights['Wout'][i][k] for k in range(hid)) + weights['Bout'][i] for i in range(2)]
+    
+    mv = max(logits); p = [math.exp(x-mv)/sum(math.exp(y-mv) for y in logits) for x in logits]
+    if not update: return p
+
+    # Backward: Gradient Flow
+    lt = list(logits); lt[target.index(1)] /= margin
+    mv = max(lt); pt = [math.exp(x-mv)/sum(math.exp(y-mv) for y in lt) for x in lt]
+    dL_dout = [pt[i] - target[i] for i in range(2)]
+    g = {k: st(len(v), len(v[0]) if isinstance(v[0], list) else None) for k, v in weights.items()}
+    
+    for i in range(2):
+        for j in range(hid): g['Wout'][i][j] = dL_dout[i] * h_act[j]
+        g['Bout'][i] = dL_dout[i]
+    
+    dL_dh = [sum(dL_dout[i]*weights['Wout'][i][j] for i in range(2))*(1 if h_pre[j]>0 else 0) for j in range(hid)]
+    for i in range(hid):
+        for j in range(embed): g['W1'][i][j] = dL_dh[i] * ln[j]
+        g['B1'][i] = dL_dh[i]
+
+    dL_dln = [sum(dL_dh[i]*weights['W1'][i][j] for i in range(hid)) for j in range(embed)]
+    for h in range(heads):
+        s, e = h*h_dim, (h+1)*h_dim
+        qs, ks, vs, attn = h_data[h]
+        for i in range(len(idx)):
+            for j in range(h_dim):
+                for k in range(embed):
+                    g['Wv'][s+j][k] += dL_dln[s+j] * attn[i] * vecs[i][k]
+                    g['E'][idx[i]][k] += dL_dln[s+j] * attn[i] * weights['Wv'][s+j][k]
+                    g['Pos'][i][k] += dL_dln[s+j] * attn[i] * weights['Wv'][s+j][k]
+
+    # Adam Update
+    t += 1
+    for k in weights:
+        is_m = isinstance(weights[k][0], list)
+        for i in range(len(weights[k])):
+            for j in (range(len(weights[k][0])) if is_m else [0]):
+                grad = g[k][i][j] if is_m else g[k][i]
+                m_n = mu*(adam_m[k][i][j] if is_m else adam_m[k][i]) + (1-mu)*grad
+                v_n = ve*(adam_v[k][i][j] if is_m else adam_v[k][i]) + (1-ve)*(grad**2)
+                if is_m: adam_m[k][i][j], adam_v[k][i][j] = m_n, v_n
+                else: adam_m[k][i], adam_v[k][i] = m_n, v_n
+                lr_t = lr * (m_n/(1-mu**t)) / (math.sqrt(v_n/(1-ve**t)) + eps)
+                if is_m: weights[k][i][j] -= lr_t
+                else: weights[k][i] -= lr_t
+    return -math.log(max(pt[target.index(1)], 1e-10))
+
+# --- 3. TRAIN & VAL ---
+train, labels = [[0,1], [1,0]], [[1,0], [0,1]]
+val_seq, val_lab = [2, 1], [1, 0]
+
+for epoch in range(1001):
+    l = sum(run_step(train[i], labels[i], True) for i in range(2))/2
+    if epoch % 200 == 0:
+        vp = run_step(val_seq)
+        print(f"Ep {epoch} | Loss: {l:.4f} | Val Guess: {[round(x,2) for x in vp]}")
