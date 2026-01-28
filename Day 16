@@ -1,0 +1,152 @@
+Goal: to make working gpt like model
+
+Insight: so when you feed characters model learns everything itself and it is much more accurate and
+precise. Also i added block_size (how many chars at a time) and batch (one block_size) + casual 
+masking - where we * -1e-9 if it is next what we want
+
+Implementation: i changed words and sentences to chars, added block_size and def batch
+
+import math, random
+
+# --- 1. DATA PIPELINE ---
+text = "the dog runs fast. the cat sleeps. the man runs."
+chars = sorted(list(set(text)))
+vocab = len(chars)
+char_to_id = { ch:i for i,ch in enumerate(chars) }
+id_to_char = { i:ch for i,ch in enumerate(chars) }
+block_size = 8
+full_data = [char_to_id[c] for c in text]
+
+def get_batch():
+    ix = [random.randint(0, len(full_data) - block_size - 1)]
+    x = [full_data[i:i+block_size] for i in ix]
+    y = [full_data[i+1:i+block_size+1] for i in ix]
+    return x, y
+
+# --- 2. CONFIG ---
+embed, hid, heads = 16, 32, 2
+lr, mu, ve, t = 0.001, 0.9, 0.999, 0
+h_dim = embed // heads
+
+# --- 3. WEIGHTS ---
+def rm(r, c=None): return [[random.uniform(-0.1, 0.1) for _ in range(c)] for _ in range(r)] if c else [0.01]*r
+def st(v): return [[0.0]*len(row) for row in v] if isinstance(v[0], list) else [0.0]*len(v)
+
+weights = {k: rm(*v) for k, v in {
+    'E':(vocab, embed), 'Pos':(block_size, embed), 
+    'Wq':(embed, embed), 'Wk':(embed, embed), 'Wv':(embed, embed),
+    'W1':(hid, embed), 'W2':(hid, hid), 'Wout':(vocab, hid)
+}.items()}
+weights.update({'B1': rm(hid), 'B2': rm(hid), 'Bout': rm(vocab)})
+
+adam_m = {k: st(v) for k, v in weights.items()}
+adam_v = {k: st(v) for k, v in weights.items()}
+
+# --- 4. ENGINE ---
+def run_step(idx, target=None, update=False):
+    global t
+    vecs = [[weights['E'][i][j] + weights['Pos'][p][j] for j in range(embed)] for p, i in enumerate(idx)]
+    h_outs = []
+    
+    for h in range(heads):
+        s = h*h_dim
+        qs = [[sum(v[k]*weights['Wq'][s+j][k] for k in range(embed)) for j in range(h_dim)] for v in vecs]
+        ks = [[sum(v[k]*weights['Wk'][s+j][k] for k in range(embed)) for j in range(h_dim)] for v in vecs]
+        vs = [[sum(v[k]*weights['Wv'][s+j][k] for k in range(embed)) for j in range(h_dim)] for v in vecs]
+        sc = [[sum(qs[q][m]*ks[k][m] for m in range(h_dim))/math.sqrt(h_dim) if k <= q else -1e9 for k in range(len(idx))] for q in range(len(idx))]
+        
+        attn = []
+        for row in sc:
+            mv_r = max(row)
+            exps = [math.exp(x - mv_r) for x in row]
+            s_exps = sum(exps)
+            attn.append([x / s_exps for x in exps])
+        h_outs.append([[sum(attn[r][i]*vs[i][j] for i in range(len(idx))) for j in range(h_dim)] for r in range(len(idx))])
+
+    final_h = []
+    for head_ctx in h_outs: final_h.extend(head_ctx[-1])
+    
+    h1_pre = [sum(final_h[k]*weights['W1'][i][k] for k in range(embed)) + weights['B1'][i] for i in range(hid)]
+    h1_act = [max(0, x) for x in h1_pre]
+    h2_pre = [sum(h1_act[k]*weights['W2'][i][k] for k in range(hid)) + weights['B2'][i] for i in range(hid)]
+    h2_act = [max(0, x) for x in h2_pre]
+    logits = [sum(h2_act[k]*weights['Wout'][i][k] for k in range(hid)) + weights['Bout'][i] for i in range(vocab)]
+    
+    mv = max(logits); exps = [math.exp(x-mv) for x in logits]; probs = [x/sum(exps) for x in exps]
+    if not update: return probs
+
+    # BACKWARD
+    g = {k: st(v) for k, v in weights.items()}
+    dL_dout = [probs[i] - (1 if i == target else 0) for i in range(vocab)]
+    for i in range(vocab):
+        for j in range(hid): g['Wout'][i][j] = dL_dout[i] * h2_act[j]
+        g['Bout'][i] = dL_dout[i]
+
+    dL_dh2 = [sum(dL_dout[i]*weights['Wout'][i][j] for i in range(vocab))*(1 if h2_pre[j]>0 else 0) for j in range(hid)]
+    for i in range(hid):
+        for j in range(hid): g['W2'][i][j] = dL_dh2[i] * h1_act[j]
+        g['B2'][i] = dL_dh2[i]
+
+    dL_dh1 = [sum(dL_dh2[i]*weights['W2'][i][j] for i in range(hid))*(1 if h1_pre[j]>0 else 0) for j in range(hid)]
+    for i in range(hid):
+        for j in range(embed): g['W1'][i][j] = dL_dh1[i] * final_h[j]
+        g['B1'][i] = dL_dh1[i]
+
+    # CORRECTED ADAM UPDATE
+    t += 1
+    for k in weights:
+        is_mat = isinstance(weights[k][0], list)
+        for i in range(len(weights[k])):
+            dims = range(len(weights[k][0])) if is_mat else [None]
+            for j in dims:
+                grad = g[k][i][j] if is_mat else g[k][i]
+                # Access adam memory safely
+                m_val = adam_m[k][i][j] if is_mat else adam_m[k][i]
+                v_val = adam_v[k][i][j] if is_mat else adam_v[k][i]
+                
+                # Update memory
+                m_new = mu * m_val + (1 - mu) * grad
+                v_new = ve * v_val + (1 - ve) * (grad**2)
+                
+                if is_mat:
+                    adam_m[k][i][j], adam_v[k][i][j] = m_new, v_new
+                else:
+                    adam_m[k][i], adam_v[k][i] = m_new, v_new
+                
+                # Bias correction and step
+                m_h = m_new / (1 - mu**t)
+                v_h = v_new / (1 - ve**t)
+                step = lr * m_h / (math.sqrt(v_h) + 1e-8)
+                
+                if is_mat: weights[k][i][j] -= step
+                else: weights[k][i] -= step
+                
+    return -math.log(max(probs[target], 1e-10))
+
+# --- 5. TRAINING ---
+print("Training Pro Transformer...")
+for i in range(1501):
+    xb, yb = get_batch()
+    loss = 0
+    for seq_x, seq_y in zip(xb, yb):
+        for t_step in range(block_size):
+            loss += run_step(seq_x[:t_step+1], target=seq_y[t_step], update=True)
+    if i % 300 == 0: print(f"Iter {i} | Loss: {loss/block_size:.4f}")
+
+# --- 6. GENERATION ---
+def generate(prompt, length=30):
+    ctx = [char_to_id[c] for c in prompt.lower() if c in char_to_id]
+    if not ctx: ctx = [random.choice(list(char_to_id.values()))]
+    for _ in range(length):
+        p = run_step(ctx[-block_size:])
+        nxt = p.index(max(p))
+        ctx.append(nxt)
+    return "".join([id_to_char[i] for i in ctx])
+
+print("\n--- Result ---")
+print("AI:", generate("the dog"))
+
+while True:
+    u = input("\nYou: ")
+    if u.lower() in ['q', 'exit']: break
+    print("AI:", generate(u))
