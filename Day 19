@@ -1,0 +1,129 @@
+Goal: to improve my model
+
+Insight: So in ff we just do what we need while in bw we just calculate error then change weights then again and again
+
+Implementation: well, i just tried to understand block_size, batch_size, to correctly understand ff and bw
+
+import math
+import random
+
+# --- 1. UTILITY FUNCTIONS ---
+
+def create_matrix(rows, cols, fill=0.0):
+    return [[fill for _ in range(cols)] for _ in range(rows)]
+
+def init_weights(rows, cols):
+    # Xavier/Glorot Initialization
+    limit = math.sqrt(6 / (rows + cols))
+    return [[random.uniform(-limit, limit) for _ in range(cols)] for _ in range(rows)]
+
+def matmul(A, B):
+    # C[i][j] = sum(A[i][k] * B[k][j])
+    R1, C1 = len(A), len(A[0])
+    R2, C2 = len(B), len(B[0])
+    res = create_matrix(R1, C2)
+    for i in range(R1):
+        for k in range(C1):
+            tmp_a = A[i][k]
+            for j in range(C2):
+                res[i][j] += tmp_a * B[k][j]
+    return res
+
+def transpose(A):
+    return [[A[j][i] for j in range(len(A))] for i in range(len(A[0]))]
+
+def softmax_2d(matrix):
+    new_matrix = []
+    for row in matrix:
+        max_val = max(row)
+        exps = [math.exp(x - max_val) for x in row]
+        sum_exps = sum(exps)
+        new_matrix.append([x / sum_exps for x in exps])
+    return new_matrix
+
+# --- 2. CONFIG ---
+block_size = 8   # Small for speed
+embed = 16       # 16 features instead of 128
+heads = 2
+head_dim = embed // heads
+vocab_size = 65  # Approximate
+lr = 0.01
+
+# --- 3. THE "PURE" ENGINE ---
+
+class PureTransformer:
+    def __init__(self):
+        # Weights as Lists of Lists
+        self.E = init_weights(vocab_size, embed)      # Embeddings
+        self.Pos = init_weights(block_size, embed)    # Position
+        self.Wq = init_weights(embed, embed)          # Attention
+        self.Wk = init_weights(embed, embed)
+        self.Wv = init_weights(embed, embed)
+        self.Wout = init_weights(embed, vocab_size)   # Output
+        
+    def forward(self, idx_batch):
+        # idx_batch is a list of lists (Batch size x T)
+        B = len(idx_batch)
+        T = len(idx_batch[0])
+        
+        # 1. Embedding Lookup + Position
+        # Shape: (B, T, embed)
+        self.x_frames = [] 
+        for b in range(B):
+            sentence_vecs = []
+            for t in range(T):
+                char_id = idx_batch[b][t]
+                # Combine Word Vector + Position Vector
+                vec = [self.E[char_id][c] + self.Pos[t][c] for c in range(embed)]
+                sentence_vecs.append(vec)
+            self.x_frames.append(sentence_vecs)
+
+        # 2. Attention (Simplified for 1 Head to keep code readable)
+        # In pure Python, we treat each batch item separately
+        self.all_probs = []
+        for b in range(B):
+            # Q = X @ Wq, K = X @ Wk, V = X @ Wv
+            Q = matmul(self.x_frames[b], self.Wq)
+            K = matmul(self.x_frames[b], self.Wk)
+            V = matmul(self.x_frames[b], self.Wv)
+            
+            # Scores = Q @ K.T
+            KT = transpose(K)
+            scores = matmul(Q, KT)
+            
+            # Scaled Dot Product + Causal Mask
+            for i in range(T):
+                for j in range(T):
+                    scores[i][j] /= math.sqrt(head_dim)
+                    if j > i: # Causal Mask (can't see future)
+                        scores[i][j] = -1e9
+            
+            attn = softmax_2d(scores)
+            context = matmul(attn, V)
+            
+            # 3. Output Logits
+            logits = matmul(context, self.Wout)
+            probs = softmax_2d(logits)
+            self.all_probs.append(probs)
+            
+        return self.all_probs
+
+    def train_step(self, xb, yb):
+        # In a real Pure Python model, backprop would be 200 lines of loops.
+        # For brevity, this demonstrates the Forward "Thinking" logic.
+        probs = self.forward(xb)
+        # Loss calculation (Cross Entropy)
+        loss = 0
+        for b in range(len(yb)):
+            for t in range(len(yb[0])):
+                target_char = yb[b][t]
+                loss -= math.log(probs[b][t][target_char] + 1e-10)
+        return loss / (len(yb) * len(yb[0]))
+
+# --- 4. RUNNING ---
+model = PureTransformer()
+dummy_idx = [[1, 5, 2, 8, 3, 0, 0, 0]] # One batch, 8 chars
+loss = model.train_step(dummy_idx, dummy_idx)
+
+print(f"Pure Python Forward Pass Complete.")
+print(f"Initial Loss: {loss:.4f}")

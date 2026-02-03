@@ -1,0 +1,148 @@
+Goal: to improve model as much as i can
+
+Insight: its much better and easier to make on numpy rather than 'pure' python iwth for loops etc
+
+Implementation: just changed for loops on @ and added things like transpose etc.
+
+import numpy as np
+
+# --- 1. DATA PREP ---
+try:
+    with open("C:\\Users\\User\\Downloads\\BNCCorpus.txt", "r", encoding="utf-8") as f:
+        text = f.read().lower()[:50000]
+        text = text.replace(". ", ".\nme: ").replace("? ", "?\nai: ")
+except:
+    text = "hello world. this is a test string to ensure the model works. " * 500
+
+chars = sorted(list(set(text)))
+vocab = len(chars)
+char_to_id = {ch: i for i, ch in enumerate(chars)}
+id_to_char = {i: ch for i, ch in enumerate(chars)}
+data = np.array([char_to_id[c] for c in text])
+
+# --- 2. CONFIG ---
+block_size = 64  # T
+embed = 128       # C
+heads = 4         # H
+head_dim = 32     # D (embed // heads)
+hid = 256         # Feed-forward dim
+lr = 0.001
+batch_size = 8    # B
+
+# --- 3. PARAMETERS ---
+def init(r, c): return np.random.randn(r, c) * np.sqrt(2.0 / (r + c))
+
+W = {
+    'E': init(vocab, embed), 'Pos': init(block_size, embed),
+    'Wq': init(embed, embed), 'Wk': init(embed, embed), 'Wv': init(embed, embed),
+    'Wproj': init(embed, embed), 'W1': init(embed, hid), 'Wout': init(hid, vocab),
+    'LNg': np.ones((1, embed)), 'LNb': np.zeros((1, embed))
+}
+B_params = {'B1': np.zeros((1, hid)), 'Bout': np.zeros((1, vocab))}
+
+m = {k: np.zeros_like(v) for k, v in {**W, **B_params}.items()}
+v = {k: np.zeros_like(v) for k, v in {**W, **B_params}.items()}
+t_adam = 0
+
+def softmax(x):
+    e = np.exp(x - np.max(x, axis=-1, keepdims=True))
+    return e / np.sum(e, axis=-1, keepdims=True)
+
+# --- 4. ENGINE ---
+def train_step(idx, targets):
+    global t_adam
+    B_batch, T = idx.shape # (B, T)
+    
+    # FORWARD
+    e_x = W['E'][idx]      # (B, T, C)
+    p_x = W['Pos'][:T]     # (T, C)
+    x_raw = e_x + p_x      # (B, T, C) via broadcasting
+    
+    mean = np.mean(x_raw, axis=-1, keepdims=True) # (B, T, 1)
+    std = np.std(x_raw, axis=-1, keepdims=True) + 1e-5 # (B, T, 1)
+    x = W['LNg'] * (x_raw - mean) / std + W['LNb']     # (B, T, C)
+    
+    Q_full = x @ W['Wq'] # (B, T, C)
+    K_full = x @ W['Wk'] # (B, T, C)
+    V_full = x @ W['Wv'] # (B, T, C)
+    
+    Q = Q_full.reshape(B_batch, T, heads, head_dim).transpose(0, 2, 1, 3) # (B, H, T, D)
+    K = K_full.reshape(B_batch, T, heads, head_dim).transpose(0, 2, 1, 3) # (B, H, T, D)
+    V = V_full.reshape(B_batch, T, heads, head_dim).transpose(0, 2, 1, 3) # (B, H, T, D)
+
+    scores = (Q @ K.transpose(0, 1, 3, 2)) / np.sqrt(head_dim) # (B, H, T, T)
+    mask = np.triu(np.ones((T, T)), k=1).astype(bool)          # (T, T)
+    scores[:, :, mask] = -1e9
+    attn = softmax(scores) # (B, H, T, T)
+    
+    context_heads = attn @ V # (B, H, T, D)
+    context_merged = context_heads.transpose(0, 2, 1, 3).reshape(B_batch, T, embed) # (B, T, C)
+    context_proj = context_merged @ W['Wproj'] # (B, T, C)
+    
+    hid_logits = np.maximum(0, context_proj @ W['W1'] + B_params['B1']) # (B, T, hid)
+    logits = hid_logits @ W['Wout'] + B_params['Bout']                 # (B, T, vocab)
+    probs = softmax(logits) # (B, T, vocab)
+
+    # BACKWARD
+    t_adam += 1
+    gradient = probs.copy() # (B, T, vocab)
+    gradient[np.arange(B_batch)[:, None], np.arange(T), targets] -= 1
+    gradient /= (B_batch * T) 
+
+    hid_logits_flat = hid_logits.reshape(-1, hid) # (B*T, hid)
+    gradient_flat = gradient.reshape(-1, vocab)   # (B*T, vocab)
+    
+    dWout = hid_logits_flat.T @ gradient_flat # (hid, vocab)
+    dBout = np.sum(gradient_flat, axis=0, keepdims=True) # (1, vocab)
+    
+    dh = (gradient_flat @ W['Wout'].T) * (hid_logits_flat > 0) # (B*T, hid)
+    dW1 = context_proj.reshape(-1, embed).T @ dh # (C, hid)
+    dB1 = np.sum(dh, axis=0, keepdims=True)       # (1, hid)
+    
+    d_context_proj = (dh @ W['W1'].T).reshape(B_batch, T, embed) # (B, T, C)
+    dWproj = context_merged.reshape(-1, embed).T @ d_context_proj.reshape(-1, embed) # (C, C)
+    
+    d_context_merged = d_context_proj @ W['Wproj'].T # (B, T, C)
+    d_context_heads = d_context_merged.reshape(B_batch, T, heads, head_dim).transpose(0, 2, 1, 3) # (B, H, T, D)
+    
+    dV_heads = attn.transpose(0, 1, 3, 2) @ d_context_heads # (B, H, T, D)
+    d_attn = d_context_heads @ V.transpose(0, 1, 3, 2)     # (B, H, T, T)
+    
+    d_scores = attn * (d_attn - np.sum(d_attn * attn, axis=-1, keepdims=True)) # (B, H, T, T)
+    d_scores /= np.sqrt(head_dim)
+    
+    dQ_heads = d_scores @ K # (B, H, T, D)
+    dK_heads = d_scores.transpose(0, 1, 3, 2) @ Q # (B, H, T, D)
+    
+    dQ = dQ_heads.transpose(0, 2, 1, 3).reshape(-1, embed) # (B*T, C)
+    dK = dK_heads.transpose(0, 2, 1, 3).reshape(-1, embed) # (B*T, C)
+    dV = dV_heads.transpose(0, 2, 1, 3).reshape(-1, embed) # (B*T, C)
+    
+    x_flat = x.reshape(-1, embed) # (B*T, C)
+    dWq, dWk, dWv = x_flat.T @ dQ, x_flat.T @ dK, x_flat.T @ dV # (C, C)
+    
+    dx = (dQ @ W['Wq'].T + dK @ W['Wk'].T + dV @ W['Wv'].T) # (B*T, C)
+    dx = (dx - np.mean(dx, axis=-1, keepdims=True)) / (np.std(x_raw.reshape(-1, embed), axis=-1, keepdims=True) + 1e-5)
+    
+    dE = np.zeros_like(W['E']) # (vocab, C)
+    np.add.at(dE, idx.reshape(-1), dx)
+    dPos = dx.reshape(B_batch, T, embed).mean(axis=0) # (T, C)
+
+    # UPDATE
+    updates = {'Wout':dWout, 'Bout':dBout, 'W1':dW1, 'B1':dB1, 'Wq':dWq, 'Wk':dWk, 'Wv':dWv, 'Wproj':dWproj, 'E':dE, 'Pos':dPos}
+    for k, grad in updates.items():
+        p_ref = W if k in W else B_params
+        grad = np.clip(grad, -1, 1)
+        m[k] = 0.9 * m[k] + 0.1 * grad
+        v[k] = 0.999 * v[k] + 0.001 * (grad**2)
+        p_ref[k] -= lr * (m[k] / (1-0.9**t_adam)) / (np.sqrt(v[k] / (1-0.999**t_adam)) + 1e-8)
+
+    return -np.mean(np.log(probs[np.arange(B_batch)[:, None], np.arange(T), targets] + 1e-10))
+
+# --- 5. EXECUTION ---
+for i in range(10001):
+    ix = np.random.randint(0, len(data) - block_size, batch_size)
+    xb = np.stack([data[j:j+block_size] for j in ix])
+    yb = np.stack([data[j+1:j+block_size+1] for j in ix])
+    loss = train_step(xb, yb)
+    if i % 500 == 0: print(f"Step {i} | Loss: {loss:.4f}")
