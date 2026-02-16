@@ -1,0 +1,417 @@
+goal: to make as advanced ai as i can
+
+implementation: i added layers (automation), written as individual funcs bw ff etc. also i added 
+advanced techniques like bpe, rope, rms, batching, kv cache, cqa, gating, ln, wd, warmup, lr, clip, 
+tmp, top k, top p, accumulation and weights saving
+
+insight: layers affect cpu (and give structure of your ai response), batch helps overall (stability),
+block affects context (ram based), embs gives meaning (ram based) and vocab gives vocabulary (ram 
+based). also rope works like this: inv creates speed, freqs creates clock (that speed on block size)
+and then you place your meaning (emb and else) on that clock. rms is (different from usual 
+normalization based on centering) based on mild changing (like log - you do not make it the same but
+you mild it). kv cache is just saving kv across different layers. cqa is merging unnesessary k and v
+so that it takes less and gives more stable result. the same way i deleted final w and it just became
+e (e in beginning and at the end). gating is making matrixes bigger at the end (so that it would
+filter better and then minimizing again (to e size)). tmp is just value at the end of probs / so we
+can either make it bigger or smaller. top k is choosing from top k numbers and top is choosing between 
+p probs. accum is saving gradients so that it would be more stable and weight saving - just saving what
+you have done.
+
+code:
+import os
+os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["OPENBLAS_NUM_THREADS"] = "4"
+os.environ["MKL_NUM_THREADS"] = "4"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "4"
+os.environ["NUMEXPR_NUM_THREADS"] = "4"
+
+if hasattr(os, 'sched_setaffinity'):
+    os.sched_setaffinity(0, range(os.cpu_count()))
+
+import sys
+import numpy as np
+
+# --- TOKENIZER (BPE) ---
+class BPETokenizer:
+    def __init__(self, vocab_size=512):
+        self.vocab_size, self.merges, self.vocab = vocab_size, {}, {i: bytes([i]) for i in range(256)}
+
+    def train(self, text):
+        tokens = list(text.encode("utf-8"))
+        for i in range(self.vocab_size - 256):
+
+            stats = {}
+            for pair in zip(tokens, tokens[1:]): stats[pair] = stats.get(pair, 0) + 1
+            if not stats: break
+
+            pair = max(stats, key=stats.get)
+            idx = 256 + i
+            self.merges[pair], self.vocab[idx] = idx, self.vocab[pair[0]] + self.vocab[pair[1]]
+            new_tokens, j = [], 0
+
+            while j < len(tokens):
+                if j < len(tokens)-1 and (tokens[j], tokens[j+1]) == pair:
+                    new_tokens.append(idx); j += 2
+                else: new_tokens.append(tokens[j]); j += 1
+            tokens = new_tokens
+        return tokens
+
+    def encode(self, text):
+        tokens = list(text.encode("utf-8"))
+        while len(tokens) >= 2:
+
+            stats = {p: self.merges[p] for p in zip(tokens, tokens[1:]) if p in self.merges}
+            if not stats: break
+
+            pair = min(stats.keys(), key=lambda p: self.merges[p])
+            idx, new_tokens, j = self.merges[pair], [], 0
+
+            while j < len(tokens):
+                if j < len(tokens)-1 and (tokens[j], tokens[j+1]) == pair:
+                    new_tokens.append(idx); j += 2
+                else: new_tokens.append(tokens[j]); j += 1
+            tokens = new_tokens
+        return tokens
+
+    def decode(self, ids):
+        return b"".join(self.vocab[idx] for idx in ids).decode("utf-8", errors="replace")
+
+# --- MODEL ---
+class GPT:
+    def __init__(self, v_size, emb, h, groups, layers, b_size):
+        self.v_size, self.emb, self.h, self.layers, self.b_size = v_size, emb, h, layers, b_size
+        self.groups, self.head_dim = groups, emb // h
+        self.heads_per_group = h // groups 
+
+        self.mask = np.triu(np.ones((b_size, b_size)), 1).astype(bool)
+        inv = 1.0 / (10000 ** (np.arange(0, self.head_dim, 2) / self.head_dim))
+        freqs = np.outer(np.arange(b_size), inv)
+        self.cos_pre, self.sin_pre = np.cos(freqs).astype(np.float16), np.sin(freqs).astype(np.float16)
+
+        self.W, self.kv_cache = {}, [None] * layers
+        self.init_w()
+        self.t = 0
+        self.m = {k: np.zeros_like(v) for k, v in self.W.items()}
+        self.v = {k: np.zeros_like(v) for k, v in self.W.items()}
+
+    def init_w(self):
+        self.W['E'] = (np.random.randn(self.v_size, self.emb) * 0.02).astype(np.float16)
+        for l in range(self.layers):
+            self.W[f'g1{l}'] = np.ones((1,1,self.emb), dtype=np.float16)
+            self.W[f'g2{l}'] = np.ones((1,1,self.emb), dtype=np.float16)
+
+            std = np.sqrt(2.0 / (2 * self.emb))
+            self.W[f'Wq{l}'] = (np.random.randn(self.emb, self.emb) * std).astype(np.float16)
+            self.W[f'Wk{l}'] = (np.random.randn(self.emb, self.groups * self.head_dim) * std).astype(np.float16)
+            self.W[f'Wv{l}'] = (np.random.randn(self.emb, self.groups * self.head_dim) * std).astype(np.float16)
+            self.W[f'Wo{l}'] = (np.random.randn(self.emb, self.emb) * std).astype(np.float16)
+            
+            hidden = int(8/3 * self.emb)
+            self.W[f'Wf1{l}'] = (np.random.randn(self.emb, hidden) * np.sqrt(2/self.emb)).astype(np.float16)
+            self.W[f'Wf2{l}'] = (np.random.randn(hidden, self.emb) * np.sqrt(2/hidden)).astype(np.float16)
+            self.W[f'Wf3{l}'] = (np.random.randn(self.emb, hidden) * np.sqrt(2/self.emb)).astype(np.float16)
+
+    def rms_norm(self, x, g, out=None):
+        if out is None: out = np.empty_like(x)
+        msq = np.mean(x.astype(np.float32)**2, axis=-1, keepdims=True)
+        out[:] = (g * (x.astype(np.float32) * (msq + 1e-6)**-0.5)).astype(np.float16)
+        return out.astype(np.float16)
+    
+    def softmax(self, x):
+        x_32 = x.astype(np.float32)
+        e_x = np.exp(x_32 - np.max(x_32, axis=-1, keepdims=True))
+        out = e_x / (e_x.sum(axis=-1, keepdims=True) + 1e-10)
+        return out.astype(np.float16)
+
+    def apply_rope(self, x, pos_idx, rev=False):
+        c, s = self.cos_pre[pos_idx], self.sin_pre[pos_idx]
+        if rev: s = -s
+        x1, x2 = x[..., 0::2], x[..., 1::2]
+        out = np.empty_like(x)
+        out[..., 0::2] = x1 * c - x2 * s
+        out[..., 1::2] = x1 * s + x2 * c
+        return out
+
+    def get_batch(self, data, batch_size):
+        ix = np.random.randint(0, len(data) - self.b_size, batch_size)
+        x = np.empty((batch_size, self.b_size), dtype=np.int32)
+        y = np.empty((batch_size, self.b_size), dtype=np.int32)
+        for i, idx in enumerate(ix):
+            x[i] = data[idx : idx + self.b_size]
+            y[i] = data[idx + 1 : idx + self.b_size + 1]
+        return x, y
+
+    def forward(self, idx, start_pos=0, use_cache=False):
+        B, T = idx.shape
+
+        # Transform discrete Token IDs into continuous 256-dim vectors
+        # Shape: (B, T) -> (B, T, 256)
+        x = self.W['E'][idx].astype(np.float16)
+
+        pos_idx = np.arange(start_pos, start_pos + T)
+        cache = {'idx': idx, 'x_0': x.copy()} 
+        
+        for l in range(self.layers):
+            ln1 = self.rms_norm(x, self.W[f'g1{l}'])
+
+            # Project normalized input into Query, Key, and Value spaces
+            # Q: (B, T, 256) @ (256, 256) -> (B, 8, T, 32) [Split into 8 heads]
+            # K/V: (B, T, 256) @ (256, 64) -> (B, 2, T, 32) [Split into 2 groups
+            q = (ln1 @ self.W[f'Wq{l}']).reshape(B, T, self.h, self.head_dim).transpose(0, 2, 1, 3).astype(np.float16)
+            k = (ln1 @ self.W[f'Wk{l}']).reshape(B, T, self.groups, self.head_dim).transpose(0, 2, 1, 3).astype(np.float16)
+            v = (ln1 @ self.W[f'Wv{l}']).reshape(B, T, self.groups, self.head_dim).transpose(0, 2, 1, 3).astype(np.float16)
+
+            q, k = self.apply_rope(q, pos_idx), self.apply_rope(k, pos_idx)
+            
+            if use_cache:
+                if self.kv_cache[l] is None or start_pos == 0: self.kv_cache[l] = (k, v)
+                else:
+                    k = np.concatenate([self.kv_cache[l][0], k], axis=2)
+                    v = np.concatenate([self.kv_cache[l][1], v], axis=2)
+                    self.kv_cache[l] = (k, v)
+            
+            # Expand Keys to match the number of Query heads (GQA logic)
+            # Shape: (B, 2, T, 32) -> (B, 8, T, 32)
+            k_rep = np.repeat(k, self.heads_per_group, axis=1)
+            v_rep = np.repeat(v, self.heads_per_group, axis=1)
+            
+            # Compute alignment scores: "How much does word T look at word T-n?"
+            # (B, 8, T, 32) @ (B, 8, 32, T) -> (B, 8, T, T)
+            sc = (q @ k_rep.transpose(0, 1, 3, 2)) / np.sqrt(self.head_dim)
+            if not use_cache: sc[:, :, self.mask[:T, :T]] = -65500
+            
+            # Convert scores to probabilities (Softmax)
+            # Result: (B, 8, T, T) summing to 1.0 across the last dimension
+            sc_32 = sc.astype(np.float32)
+            e_x = np.exp(sc_32 - np.max(sc_32, axis=-1, keepdims=True))
+            attn = (e_x / (e_x.sum(axis=-1, keepdims=True) + 1e-10)).astype(np.float16)
+            
+            # Use attention weights to mix the "Content" (Values)
+            # Input: (B, h, T, T) @ (B, h, T, head_dim) -> Output: (B, h, T, head_dim)
+            out_att = (attn @ v_rep).transpose(0, 2, 1, 3).reshape(B, T, self.emb)
+
+            # Project mixed content back to the residual highway and add it
+            # (B, T, self.emb) + (B, T, self.emb) -> (B, T, self.emb)
+            x += out_att @ self.W[f'Wo{l}']
+            
+            # Normalize the highway (Residual Stream)
+            # Input: (B, T, 256) -> Output: (B, T, 256)
+            ln2 = self.rms_norm(x, self.W[f'g2{l}'])
+
+            # Project to Hidden Space (Expansion)
+            # (B, T, 256) @ (256, 682) -> (B, T, 682)
+            gate = ln2 @ self.W[f'Wf1{l}']
+            up = ln2 @ self.W[f'Wf3{l}']
+
+            # Apply Activation (Swish)
+            # Shape remains (B, T, 682)
+            gate_32 = gate.astype(np.float32)
+            act_gate = (gate_32 / (1.0 + np.exp(-gate_32))).astype(np.float16)
+
+            # Element-wise multiply and Shrink back to Embedding size
+            # (B, T, 682) * (B, T, 682) -> (B, T, 682)
+            # (B, T, 682) @ (682, 256) -> (B, T, 256)
+            x += (act_gate * up) @ self.W[f'Wf2{l}']
+            cache[f'l{l}'] = (ln1, q, k, v, attn, out_att, ln2, gate, up, act_gate)
+
+        cache['x_final'] = x
+        return x @ self.W['E'].T, cache
+
+    def backward(self, yb, logits, cache):
+        B, T = yb.shape
+        grads = {k: np.zeros_like(v, dtype=np.float32) for k, v in self.W.items()}
+        pp_sum = np.exp(logits.astype(np.float32) - np.max(logits.astype(np.float32), axis=-1, keepdims=True))
+        probs = pp_sum / (pp_sum.sum(axis=-1, keepdims=True) + 1e-10)
+        probs[np.arange(B)[:, None], np.arange(T), yb] -= 1
+
+        # Calculate Cross-Entropy Loss gradient (Probs - Ground Truth)
+        # Shape: (B, T, Vocab)
+        dl = (probs / (B * T)).astype(np.float16)
+        
+        # Calculate error for output projection
+        # (B, T, vocab) @ (B, T, 256) -> (Vocab, 256)
+        grads['E'] += (dl.transpose(0, 2, 1) @ cache['x_final']).sum(0)
+
+        # Backprop error into the residual stream 'dx'
+        # (B, T, Vocab) @ (Vocab, Emb) -> (B, T, Emb)
+        dx = (dl @ self.W['E']).astype(np.float16)
+        pos_idx = np.arange(T)
+
+        for l in reversed(range(self.layers)):
+            ln1, q, k, v, attn, out_att, ln2, gate, up, act_gate = cache[f'l{l}']
+
+            # Move error through the SwiGLU bottleneck
+            # (B, T, 256) @ (256, 682) -> (B, T, 682)
+            df2 = dx @ self.W[f'Wf2{l}'].T
+
+            # Gradient for Wf2: Input (act_gate) @ Error (dx)
+            # (Hidden, B*T) @ (B*T, Emb) -> (Hidden, Emb)
+            grads[f'Wf2{l}'] += act_gate.reshape(-1, act_gate.shape[-1]).T @ dx.reshape(-1, self.emb)
+            
+            sig = 1 / (1 + np.exp(-gate.astype(np.float32)))
+            dgate32 = (df2.astype(np.float32) * up) * (sig * (1 + gate.astype(np.float32) * (1 - sig)))
+            dgate = dgate32.astype(np.float16)
+            dup = (df2 * act_gate).astype(np.float16)
+
+            # Gradient for Weight f3 (Up projection)
+            # (256, B*T) @ (B*T, 682) -> (256, 682)
+            grads[f'Wf3{l}'] += ln2.reshape(-1, self.emb).T @ dup.reshape(-1, dup.shape[-1])
+            grads[f'Wf1{l}'] += ln2.reshape(-1, self.emb).T @ dgate.reshape(-1, dgate.shape[-1])
+            
+            # Update dx with the error flowing through the MLP back to the main highway
+            # (B, T, Hidden) @ (Hidden, Emb) -> (B, T, Emb)
+            dx += (dgate @ self.W[f'Wf1{l}'].T) + (dup @ self.W[f'Wf3{l}'].T)
+            
+            grads[f'Wo{l}'] += out_att.reshape(-1, self.emb).T @ dx.reshape(-1, self.emb)
+            
+            # Error for the attention mechanism result
+            # (B, T, Emb) @ (Emb, Emb) -> (B, 8, T, 32)
+            dout = (dx @ self.W[f'Wo{l}'].T).reshape(B, T, self.h, self.head_dim).transpose(0, 2, 1, 3)
+            
+            # Error for V: Sum heads back into groups
+            # (B, 8, T, T).T @ (B, 8, T, 32) -> (B, 2, T, 32)
+            dv = (attn.transpose(0, 1, 3, 2) @ dout).reshape(B, self.groups, self.heads_per_group, T, self.head_dim).sum(2)
+            
+            # Error for Attention Scores (Softmax derivative)
+            da = (dout @ np.repeat(v, self.heads_per_group, axis=1).transpose(0, 1, 3, 2))
+            da_f32 = da.astype(np.float32)
+            attn_f32 = attn.astype(np.float32)
+            ds = attn_f32 * (da_f32 - (attn_f32 * da_f32).sum(-1, keepdims=True))
+            ds = ds.astype(np.float16)
+
+            # Error for Q and K (Untwist RoPE first)
+            dq = self.apply_rope(ds @ np.repeat(k, self.heads_per_group, axis=1), pos_idx, rev=True) / np.sqrt(self.head_dim)
+            dk = self.apply_rope(ds.transpose(0, 1, 3, 2) @ q, pos_idx, rev=True).reshape(B, self.groups, self.heads_per_group, T, self.head_dim).sum(2) / np.sqrt(self.head_dim)
+            
+            # Backprop to Q, K, V Projection weights
+            # (Emb, B*T) @ (B*T, Head_Dim) -> (Emb, Emb)
+            grads[f'Wq{l}'] += ln1.reshape(-1, self.emb).T @ dq.transpose(0, 2, 1, 3).reshape(-1, self.emb)
+            grads[f'Wk{l}'] += ln1.reshape(-1, self.emb).T @ dk.transpose(0, 2, 1, 3).reshape(-1, self.groups*self.head_dim)
+            grads[f'Wv{l}'] += ln1.reshape(-1, self.emb).T @ dv.transpose(0, 2, 1, 3).reshape(-1, self.groups*self.head_dim)
+            
+            dx += (dq.transpose(0, 2, 1, 3).reshape(-1, self.emb) @ self.W[f'Wq{l}'].T).reshape(B, T, self.emb)
+        
+        np.add.at(grads['E'], cache['idx'], dx)
+        return grads
+
+    def update(self, grads, step, lr_max, warmup, wd):
+        self.t += 1
+        lr = lr_max * min(1.0, step/warmup) * max(0.1, 1.0 - (step-warmup)/4000)
+        for k in self.W:
+            g = np.clip(grads[k], -1.0, 1.0)
+
+            self.m[k] = (0.9 * self.m[k].astype(np.float32) + 0.1 * g)
+            self.v[k] = (0.999 * self.v[k].astype(np.float32) + 0.001 * (g**2))
+
+            mh = self.m[k] / (1 - 0.9**self.t)
+            vh = self.v[k] / (1 - 0.999**self.t)
+            
+            update_val = lr * (mh / (np.sqrt(vh) + 1e-8) + wd * self.W[k].astype(np.float32))
+            self.W[k] = (self.W[k].astype(np.float32) - update_val).astype(np.float16)
+        
+        if self.t % 25 == 0:
+                for k, g in grads.items():
+                    print(f"{k} | Mean: {np.mean(g):.6f} | Std: {np.std(g):.6f}")
+
+    def generate(self, prompt, tok, length=30, tmp=0.7, k=40, p=0.9):
+        ids = tok.encode(prompt)
+        self.kv_cache = [None] * self.layers
+        curr_ids = np.array(ids).reshape(1, -1)
+
+        for _ in range(length):
+            logits, _ = self.forward(curr_ids, start_pos=len(ids)-curr_ids.shape[1], use_cache=True)
+            logits = logits[0, -1, :].astype(np.float32) / (tmp + 1e-10)
+
+            if k > 0: logits[logits < np.partition(logits, -k)[-k]] = -1e4
+            probs = np.exp(logits - np.max(logits))
+            probs /= (probs.sum() + 1e-10)
+
+            if p < 1.0:
+                si = np.argsort(probs)[::-1]; sp = probs[si]; cp = np.cumsum(sp)
+                ir = cp > p; ir[1:] = ir[:-1].copy(); ir[0] = False
+                probs[si[ir]] = 0; probs /= (probs.sum() + 1e-10)
+                
+            next_id = np.random.choice(len(probs), p=probs)
+            ids.append(next_id); curr_ids = np.array([[next_id]])
+            print(tok.decode([next_id]), end="", flush=True)
+        return ids
+
+# --- CONFIG ---
+path = "C:\\Users\\user\\Downloads\\BNCCorpus.txt" 
+weight_path = "C:\\Users\\user\\Downloads\\model_weights.npz"
+token_path = "C:\\Users\\user\\Downloads\\tokenized_data.npy"
+vocab_size, block_size, embed, groups, heads, n_layers = 384, 128, 64, 2, 4, 3
+lr_max, batch_size, warmup, accum_steps, wd = 0.0001, 4, 200, 1, 0.1
+
+# --- EXECUTION ---
+try:
+    with open(path, "r", encoding="utf-8") as f: text = f.read().lower()[:150000]
+except: print('No data...'); sys.exit()
+
+tokenizer = BPETokenizer(vocab_size)
+if os.path.exists(token_path):
+    token_data = np.load(token_path)
+    print("Loaded pre-tokenized data.")
+else:
+    with open(path, "r", encoding="utf-8") as f: 
+        text = f.read().lower()[:150000]
+    print("Tokenizing text (this may take a few minutes once)...")
+    token_data = np.array(tokenizer.encode(text), dtype=np.uint16)
+    np.save(token_path, token_data)
+    print("Tokens saved.")
+
+n = int(0.9 * len(token_data))
+train_data, val_data = token_data[:n], token_data[n:]
+
+gpt = GPT(vocab_size, embed, heads, groups, n_layers, block_size)
+if os.path.exists(weight_path):
+    cp = np.load(weight_path)
+
+    for k in gpt.W:
+        if k in cp: gpt.W[k] = cp[k]
+        if f"m_{k}" in cp: gpt.m[k], gpt.v[k] = cp[f"m_{k}"], cp[f"v_{k}"]
+    print("Existing weights loaded.")
+    mode = input("\n[T]rain further or [C]hat only? ").lower()
+
+else:
+    print("No weights found. Starting fresh training...")
+    mode = 't'
+
+if mode == 't':
+    token_data = np.array(tokenizer.encode(text), dtype=np.uint16)
+    n = int(0.9 * len(token_data))
+    train_data, val_data = token_data[:n], token_data[n:]
+    acc_grads = {k: np.zeros_like(v, dtype=np.float32) for k, v in gpt.W.items()}
+    
+    for i in range(401):
+        xb, yb = gpt.get_batch(train_data, batch_size)
+        logits, cache = gpt.forward(xb)
+        grads = gpt.backward(yb, logits, cache)
+        for k in grads: acc_grads[k] += np.clip(grads[k], -1.0, 1.0)
+        del cache  
+        del grads
+
+        if i % 1 == 0: 
+            print(f"Iteration {i} started...", end='\r')
+        
+        if (i + 1) % accum_steps == 0:
+            for k in acc_grads: acc_grads[k] /= accum_steps
+            gpt.update(acc_grads, i // accum_steps, lr_max, warmup, wd)
+            for k in acc_grads: acc_grads[k].fill(0)
+
+        if i % 20 == 0:
+            xv, yv = gpt.get_batch(val_data, batch_size)
+            v_logits, _ = gpt.forward(xv)
+            v_probs = gpt.softmax(v_logits)
+            v_loss = -np.mean(np.log(v_probs[np.arange(batch_size)[:,None], np.arange(block_size), yv] + 1e-10))
+            
+            save_dict = {**gpt.W, **{f"m_{k}": gpt.m[k] for k in gpt.W}, **{f"v_{k}": gpt.v[k] for k in gpt.W}}
+            np.savez(weight_path, **save_dict)
+            print(f"Step {i:5d} | Loss: {v_loss:.4f} ", flush=True)
+
+print("\n--- Chatting ---")
+while True:
+    u = input("\n> ").strip()
+    if u in ['q', 'exit']: break
+    gpt.generate(u, tokenizer,  length=60, tmp=0.8)
+    print()
