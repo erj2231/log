@@ -1,0 +1,489 @@
+well again i dont really think its that much as i learn but
+
+Implementation: i fixed a lot of things (like it returned 5 items while in train there were only 3 
+etc)and added some new things AND UNDERSTOOD LOGIC AS I DIVIDED EVERYTHING BY CLASSES AND MEANS. 
+before starting from numpy version i struggled with syntax cuz it was cumbersome and constantly
+little by little changed without sense. now i divided everything so that 1. it is replacable 2. clear
+3. easy to debug. AS I STRUGGLED TO DEBUG BEFORE TOO NOW ITS OBVIOUS (EVEN IF I HAVE SHAPES ITS IN DIF
+BLOCKS AND THERES NOT MUCH - WIN WIN)
+
+Insight: well pytorch indeed saves a lot of time, i dont need to make 700+ lines of code to just make 
+bw and ff (everything is done behind the scenes its great) and now after i understood rms adam etc i 
+will start to make my own inventions, i think that it the time. even tho i have weak laptop it wont 
+stop me.
+
+code: 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import regex as re
+import os
+with open('C:\\Users\\user\\Downloads\\BNCCorpus.txt', 'r', encoding='utf-8') as f:    text = f.read()
+
+def debug(name, tensor): print(f'debug [{name}]: shape={list(tensor.shape)} | mean={tensor.mean().item():.4f}')
+
+def get_batch(dataset, length, batch_size):
+    ix = torch.randint(len(dataset) - length - 2, (batch_size,))
+    x = torch.stack([torch.from_numpy(dataset[i:i+length]).long() for i in ix])
+    y1 = torch.stack([torch.from_numpy(dataset[i+1:i+length+1]).long() for i in ix])
+    y2 = torch.stack([torch.from_numpy(dataset[i+2:i+length+2]).long() for i in ix])
+    return x, y1, y2
+
+def solidify(model):
+    print("\n-> SOLIDIFYING CORE: Migrating to INT8 for Ryzen 3...")
+    model.eval()
+    qmodel = torch.ao.quantization.quantize_dynamic(
+        model, {nn.Linear}, dtype=torch.qint8)
+    return qmodel
+
+def print_sovereign_report(step, loss, experts_usage):
+    print(f"\n--- SOVEREIGN PERFORMANCE REPORT ---")
+    print(f"Step: {step} | Convergence: {1/loss:.4f}")
+    print(f"Expert Balance (Entropy): {np.std(experts_usage):.2f}")
+    print(f"Hardware Status: Stable (Ryzen 3 Optimized)")
+    print(f"------------------------------------\n")
+
+def loadbalance(routes, experts):
+    valid_routes = [r for r in routes if r is not None]
+    if not valid_routes: return 0
+
+    allroutes = torch.cat([r.view(-1, experts) for r in valid_routes])
+    importance = allroutes.mean(dim=0)
+
+    loss = experts * torch.sum(importance**2) - 1
+    return loss
+
+class bpe:
+    def __init__(self, v):
+        self.v = v
+        self.merges = {}
+        self.vocab = {i: bytes([i]) for i in range(256)}
+        self.cache = {}
+        self.split_pattern = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+    def train(self, text):
+        word_chunks = re.findall(self.split_pattern, text)
+        word_counts = {}
+        for word in word_chunks:
+            tokens = tuple(word.encode('utf-8'))
+            word_counts[tokens] = word_counts.get(tokens, 0) + 1
+
+        for v in range(self.v - 256):
+            stats = {}
+            for word_tokens, freq in word_counts.items():
+                for pair in zip(word_tokens, word_tokens[1:]):
+                    stats[pair] = stats.get(pair, 0) + freq
+            if not stats: break
+            
+            max_pair = max(stats, key=stats.get)
+            idx = 256 + v
+            self.merges[max_pair] = idx
+            self.vocab[idx] = self.vocab[max_pair[0]] + self.vocab[max_pair[1]]
+
+            new_word_counts = {}
+            for word_tokens, freq in word_counts.items():
+                new_tokens = self._merge(word_tokens, max_pair, idx)
+                new_word_counts[new_tokens] = freq
+            word_counts = new_word_counts
+        
+    def _merge(self, tokens, pair, idx):
+        new_tokens = []
+        i = 0
+        while i < len(tokens):
+            if i < len(tokens) - 1 and (tokens[i], tokens[i+1]) == pair:
+                new_tokens.append(idx)
+                i += 2
+            else:
+                new_tokens.append(tokens[i])
+                i += 1
+        return tuple(new_tokens)
+
+    def encode(self, text):
+        if text in self.cache: return self.cache[text]
+        word_chunks = re.findall(self.split_pattern, text)
+        final_ids = []
+        for word in word_chunks:
+            final_ids.extend(self._encode_word(word))
+        
+        self.cache[text] = final_ids
+        return final_ids
+
+    def _encode_word(self, word):
+        tokens = list(word.encode('utf-8'))
+        while len(tokens) >= 2:
+            stats = {p: self.merges[p] for p in zip(tokens, tokens[1:]) if p in self.merges}
+            if not stats: break
+            pair = min(stats.keys(), key=lambda p: self.merges[p])
+            tokens = list(self._merge(tokens, pair, self.merges[pair]))
+        return tokens
+
+    def decode(self, ids):
+        return b"".join(self.vocab.get(i, b"<?>") for i in ids).decode('utf-8', errors='replace')
+
+class rms(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+    
+    def forward(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) + self.weight
+
+class mrrope(nn.Module):
+    def __init__(self, q, k, z):
+        super().__init__()
+        self.q = q
+        self.k = k
+        self.z = z
+    
+    def rotatehalf(self, x):
+        x1, x2 = x.chunk(2, dim=-1)
+        return torch.cat((-x2, x1), dim=-1)
+    
+    def apply(self, q, k):
+        T = q.shape[1]
+        dim = q.shape[-1]
+        rates = torch.exp(torch.linspace(0, -np.log(10000), dim // 2)).to(q.device)
+        t = torch.arange(T, device=q.device).float()
+        freqs = torch.outer(t, rates)
+        cos = torch.cos(freqs).repeat(1, 2)
+        sin = torch.sin(freqs).repeat(1, 2)
+        q = (q * cos) + (self.rotatehalf(q) * sin)
+        k = (k * cos) + (self.rotatehalf(k) * sin)
+        return q, k
+
+class hashedmla(nn.Module):
+    def __init__(self, emb, nbuckets):
+        super().__init__()
+        self.kv_dim = emb // 4
+        self.nbuckets = nbuckets
+        self.lshproj = nn.Parameter(torch.randn(self.kv_dim, nbuckets))
+    
+    def forward(self, q, k, v):
+        q_b = torch.argmax(q @ self.lshproj, dim=-1)
+        k_b = torch.argmax(k @ self.lshproj, dim=-1)
+
+        mask = (q_b.unsqueeze(-1) == k_b.unsqueeze(-2))
+
+        attn = (q @ k.transpose(-2, -1) * (self.kv_dim ** -0.5))
+        attn = attn.masked_fill(~mask, -1e9)
+
+        weights = F.softmax(attn, dim=-1)
+        return weights @ v
+
+class moe(nn.Module):
+    def __init__(self, emb, experts):
+        super().__init__()
+        self.experts = experts
+        kv_dim = emb // 4
+        self.w_q = nn.Parameter(torch.randn(experts, emb, kv_dim))
+        self.w_o = nn.Parameter(torch.randn(experts, kv_dim, emb))
+    
+    def forward(self, x, route_soft):
+        q_experts = torch.einsum('bti,eio->bteo', x, self.w_q)
+        out_experts = torch.einsum('bteo,eok->btek', q_experts, self.w_o)
+        out = (out_experts * route_soft.unsqueeze(-1)).sum(dim=2)
+        return out
+
+class lnn(nn.Module):
+    def __init__(self, emb):
+        super().__init__()
+        self.dt = nn.Parameter(torch.randn(emb))
+        self.ambient = nn.Parameter(torch.ones(1))
+        self.tau = nn.Parameter(torch.ones(emb))
+
+    def forward(self, h, combined_context):
+        dt = self.dt * torch.sigmoid(self.ambient)
+        dh_dt = (-h + combined_context) / torch.exp(self.tau)
+        h_liquid = h + dh_dt * dt
+        return h_liquid
+
+class swigluznn(nn.Module):
+    def __init__(self, emb):
+        super().__init__()
+        self.wgate = nn.Linear(emb, int(8/3 * emb))
+        self.wup = nn.Linear(emb, int(8/3 * emb))
+        self.wdown = nn.Linear(int(8/3 * emb), emb)
+
+    def forward(self, hin, h_liquid):
+        gate = self.wgate(h_liquid)
+        up = self.wup(h_liquid)
+        hff = F.silu(gate) * up
+        h = hin + self.wdown(hff)
+        return h
+
+class lru(nn.Module):
+    def __init__(self, emb):
+        super().__init__()
+        self.cache = []
+        self.lrugate = nn.Linear(emb, emb)
+
+    def forward(self, lrustate, hnorm):
+        lambda_lru = torch.sigmoid(self.lrugate(hnorm))
+        lru_expanded = lrustate.unsqueeze(1).expand(-1, hnorm.size(1), -1)
+        h_mem = lambda_lru * hnorm + (1 - lambda_lru) * lru_expanded
+        return h_mem
+
+class heads(nn.Module):
+    def __init__(self, emb, vocab):
+        super().__init__()
+        self.embed = nn.Embedding(vocab, emb)
+        self.pred_state = nn.Linear(emb, emb)
+        self.head_t1 = nn.Linear(emb, emb, bias=False)
+        self.head_t2 = nn.Linear(emb, emb, bias=False)
+        self.norm_f = rms(emb)
+        self.tw = self.embed.weight
+
+    def forward(self, h_final, i4=None):
+        h_final = self.norm_f(h_final)
+        l1 = self.head_t1(h_final)
+        ph = self.pred_state(h_final)
+        l2 = None
+        if i4 is not None:
+            l2 = self.head_t2(self.norm_f(i4))
+        return l1, l2, ph, h_final
+
+class layer(nn.Module):
+    def __init__(self, i, emb, experts):
+        super().__init__()
+        self.i = i
+        self.lru = lru(emb)
+        self.lnn = lnn(emb)
+        self.norm = rms(emb)
+        self.mrrope = mrrope(emb // 8, emb // 8, emb)
+
+        if i % 3 == 0:
+            self.is_expert = True
+            self.branch = moe(emb, experts)
+            self.router = nn.Linear(emb, experts)
+        else:
+            self.is_expert = False
+            self.branch = swigluznn(emb)
+
+    def forward(self, h, lrustate, route=None):
+        hnorm = self.norm(h)
+        h_mem = self.lru(lrustate, hnorm)
+        h_mem, _ = self.mrrope.apply(h_mem, h_mem)
+        if self.is_expert:
+            combined_context = self.branch(h_mem, route)
+        else:
+            combined_context = self.branch(h, h_mem) 
+        h_liquid = self.lnn(h_mem, combined_context)
+        new_lru_state = h_liquid[:, -1, :].detach() 
+        return h + h_liquid, new_lru_state, route
+
+class model(nn.Module):
+    def __init__(self, vocab, emb, n_layers, n_experts):
+        super().__init__()
+        self.emb = emb
+        self.vocab = vocab
+        self.n_experts = n_experts
+        self.layers = nn.ModuleList([layer(i, emb, n_experts) for i in range(n_layers)])
+        self.heads = heads(emb, vocab)
+
+    def forward(self, x, lru=None, step=0, tau=1.0):
+        h = self.embed(x)
+        if lru is None: lru = torch.zeros(x.size(0), self.emb, device=x.device)
+        routes = []
+
+        for i, l in enumerate(self.layers):
+            route = None
+            if l.is_expert:
+                logits = l.router(h)
+                if self.training and step < 500:
+                    route = torch.ones_like(logits) / self.n_experts
+                else:
+                    route = F.gumbel_softmax(logits, tau=tau, hard=True)
+                routes.append(route)
+            h, lru_new, route = l(h, lru, route)
+            lru = lru_new 
+            if i == 1: i4 = h.clone()
+
+        l1, l2, ph, h_final = self.heads(h, i4)
+        return l1, l2, ph, h_final, lru, routes
+
+
+class generate(nn.Module):
+    def __init__(self, model, tokenizer, length, tmp, topk, topp):
+        super().__init__()
+        self.model = model
+        self.tokenizer = tokenizer
+        self.length = length
+        self.tmp = tmp
+        self.topk = topk
+        self.topp = topp
+
+    @torch.no_grad()
+    def forward(self, prompt):
+        self.eval()
+        device = next(self.model.parameters()).device
+        tokens = torch.tensor([self.tokenizer.encode(prompt)], dtype=torch.long)
+        tokens = tokens.to(device)
+        lru_state = None
+        print('\n')
+        print('model: ', end='', flush=True)
+        for _ in range(self.length):
+            logits1, logits2, _, _, _, _ = self.model(tokens, lru=lru_state)
+
+            next_token_logits = logits1[:, -1, :] / self.tmp
+            sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_indices_to_remove = cumulative_probs > self.topp
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0
+            indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+            next_token_logits[indices_to_remove] = float('-inf')
+            probs = F.softmax(next_token_logits, dim=-1)
+            spec1 = torch.multinomial(probs, num_samples=1)
+
+            if logits2 is not None: 
+                spec2 = logits2[:, -1, :].argmax(-1, keepdim=True)
+                val1, _, _, _, _, _ = self.model.forward(spec1, lru=lru_state)
+                val2 = val1[:, -1, :].argmax(-1, keepdim=True)
+                if spec2 == val2:
+                    tokens = torch.cat([tokens, spec1, spec2], dim=1)
+                    print(self.tokenizer.decode(spec1[0].tolist()) + 
+                          self.tokenizer.decode(spec2[0].tolist()), end='', flush=True)
+                    tokens = spec2
+                    continue
+            print(self.tokenizer.decode(spec1[0].tolist()), end='', flush=True)
+            tokens = spec1
+
+path = 'C:\\Users\\user\\Downloads\\BNCCorpus.txt'
+tokens = 'C:\\Users\\user\\Downloads\\tokenized_data.npy'
+vocab, emb, layers, experts = 2048, 128, 3, 4
+block, batch, baselr, minlr = 64, 8, 5e-4, 5e-5
+inittau, mintau, steps, warmup = 1.0, 0.1, 401, 200
+
+tokenizer = bpe(vocab)
+if os.path.exists(tokens):
+    token_data = np.load(tokens)
+    print("Loaded pre-tokenized data.")
+else:
+    with open(path, "r", encoding="utf-8") as f: 
+        text = f.read().lower()[:100000]
+    print("Tokenizing text (this may take a few minutes once)...")
+    token_data = np.array(tokenizer.encode(text), dtype=np.uint16)
+    np.save(tokens, token_data)
+    print("Tokens saved.")
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+gpt = model(vocab, emb, layers, experts).to(device)
+optimizer = torch.optim.AdamW(gpt.parameters(), lr=5e-4, weight_decay=0.01)
+scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() else None
+
+checkpoint_path = "sovereign_core.pt"
+print("\n[SOVEREIGN CORE MANAGEMENT]")
+action = input("Command: [c]ontinue, [i]nterface/chat, or [d]elete? ").lower()
+
+if action == 'd':
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
+        print("!!! CORE PURGED: Starting fresh. !!!")
+    start_step = 0
+    mode = 'train'
+
+elif action == 'i':
+    if os.path.exists(checkpoint_path):
+        print("--- Loading Sovereign for Dialogue... ---")
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        gpt.load_state_dict(checkpoint['model_state_dict']) 
+        gpt.eval()
+        mode = 'chat'
+    else:
+        print("!! No Core found to chat with. Please train first. !!")
+        exit()
+
+elif action == 'c':
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        gpt.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_step = checkpoint['step']
+        mode = 'train'
+        print(f"-> Resuming training from step {start_step}")
+    else:
+        print("? No checkpoint found. Starting fresh.")
+        start_step = 0
+        mode = 'train'
+else:
+    print("--- Initializing New Training ---")
+    start_step = 0
+    mode = 'train'
+
+if mode == 'chat':
+    print("\n" + "="*30)
+    print(" SOVEREIGN INTERFACE ACTIVE ")
+    print(" (Type 'exit' to close) ")
+    print("="*30)
+    generator = generate(gpt, tokenizer, length=50, tmp=0.7, topk=50, topp=0.9)
+    while True:
+        u = input("\nYou: ").strip()
+        if u.lower() in ['exit', 'q']: break
+        generator(u)
+
+elif mode == 'train':
+    for i in range(start_step, steps):
+        if i < warmup:
+            curr_lr = baselr * (i / warmup)
+            curr_tau = inittau - (inittau - mintau) * (i / steps)
+        else:
+            progress = (i - warmup) / (steps - warmup)
+            curr_lr = minlr + 0.5 * (baselr - minlr) * (1 + np.cos(np.pi * progress))
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = curr_lr
+        xb, yb1, yb2 = get_batch(token_data, block, batch)
+        xb, yb1, yb2 = xb.to(device), yb1.to(device), yb2.to(device)
+        
+        dtype = torch.float16 if torch.cuda.is_available() else torch.bfloat16
+        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        with torch.amp.autocast(device_type=device_type, dtype=dtype):
+            l1, l2, ph, hf, _, routes = gpt(xb, step=i, tau=curr_tau)
+            loss_t1 = F.cross_entropy(l1.view(-1, vocab), yb1.view(-1))
+            if i > 200:
+                main_loss = F.cross_entropy(l1.view(-1, vocab), yb1.view(-1))
+                aux_loss = loadbalance(routes, experts)
+                dream_loss = F.mse_loss(ph[:, :-1, :], hf[:, 1:, :].detach())
+                total_loss = main_loss + 0.01 * aux_loss + dream_loss * 0.1
+            else:
+                total_loss = loss_t1
+        
+        optimizer.zero_grad()
+        if scaler:
+            scaler.scale(total_loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(gpt.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(gpt.parameters(), max_norm=1.0)
+            optimizer.step()
+        if i % 50 == 0: 
+            valid = [r for r in routes if r is not None]
+            usage = valid[-1].sum(dim=(0, 1)).cpu().detach().float().numpy()
+            print_sovereign_report(i, total_loss.item(), usage)
+        if i % 200 == 0 and i > start_step:
+            temp_path = checkpoint_path + ".tmp"
+            torch.save({
+                'step': i,
+                'model_state_dict': gpt.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': total_loss.item(),
+            }, temp_path)
+            os.replace(temp_path, checkpoint_path) 
+print("\n--- TRAINING COMPLETE ---")
+actionf = input("Command: [q]uantize model or just [s]ave? ").lower()
+
+if actionf == 'q':
+    if os.path.exists(checkpoint_path):
+        gpt = solidify(gpt)
+        torch.save(gpt.state_dict(), "C:\\Users\\user\\Downloads\\sovereign_solid.pt")
+        print("-> Final Core Solidified and Saved as 'sovereign_solid.pt'")
+
+elif actionf == 's':
+    if os.path.exists(checkpoint_path):
+        torch.save(gpt.state_dict(), "C:\\Users\\user\\Downloads\\sovereign_solid.pt")
+        print("-> Final Core Just Saved as 'sovereign_solid.pt'")
