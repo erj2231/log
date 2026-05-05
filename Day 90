@@ -1,0 +1,1126 @@
+Insghit: so i in previous log 5 days ago had improved effeciency and technical skills by leap and
+now i wanted to make even better so i looked up what i had yet to implement and added: matryoshka
+(accum for embs that was really easy even tho i had failed with slicing a lot), quantizaiton (at
+first it was manual functions where i defined {-1, 0, 1} or diff with round and ste but then i 
+understood that it wont work good and is too messy so i found fsq (just automated quantization 
+with slicing and radix for depth) but then it turned out that i had to implement lora too (for it
+to have its speed) which is just like swiglu diminishing and magnifying but then adding (not as
+full weigths), and also knapspec (like the same as i had else block for logits but now it decides
+not to whether to get one logits but overall number) and value iteration module (similar).
+
+Implementation: as i wrote i added new class (fsqlore) + changed other blocks idk
+
+import numpy as np
+import regex as re
+import time
+import pandas as pd
+import gc
+import sys
+import psutil
+import math
+import pickle
+import os
+import torch
+import torch.nn as nn
+import torch.nn.functional as F 
+from queue import Queue
+from threading import Thread
+from torch.utils.tensorboard import SummaryWriter
+# i have 8 virtual cores but they are weak so only 6
+torch.set_num_threads(6)
+# little faster
+torch.backends.mkldnn.enabled = True 
+# i dont need strict graph
+torch.autograd.profiler.profile(False)
+# dont care about decimals
+torch.set_flush_denormal(True)
+# to make reproducible
+torch.manual_seed(42)
+torch.use_deterministic_algorithms(True, warn_only=True)
+# to save ram
+from torch.utils.checkpoint import checkpoint
+
+class bpe:
+    def __init__(self, v):
+        self.v = v
+        self.merges = {}
+        self.vocab = {i: bytes([i]) for i in range(256)}
+        self.cache = {}
+        self.split_pattern = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+    # making rules
+    def train(self, text):
+        # essentially from gpt2 logic
+        word_chunks = re.findall(self.split_pattern, text)
+        word_counts = {}
+        # counting for now
+        for word in word_chunks:
+            tokens = tuple(word.encode('utf-8'))
+            word_counts[tokens] = word_counts.get(tokens, 0) + 1
+
+        # those pairing most often counting now
+        stats = {}
+        for word_tokens, freq in word_counts.items():
+            for pair in zip(word_tokens, word_tokens[1:]):
+                stats[pair] = stats.get(pair, 0) + freq
+
+        # for your vocab
+        for v in range(self.v - 256):
+            if not stats: break
+            
+            # mapping new words into merges for pc and vocab for human
+            max_pair = max(stats, key=stats.get)
+            idx = 256 + v
+            self.merges[max_pair] = idx
+            self.vocab[idx] = self.vocab[max_pair[0]] + self.vocab[max_pair[1]]
+
+            # recalculating after merges and vocab with - in counts
+            new_word_counts = {}
+            for word_tokens, freq in word_counts.items():
+                if max_pair[0] in word_tokens and max_pair[1] in word_tokens:
+                    for p in zip(word_tokens, word_tokens[1:]):
+                        stats[p] -= freq
+                    
+                    # saving to new counts
+                    new_tokens = self._merge(word_tokens, max_pair, idx)
+                    new_word_counts[new_tokens] = freq
+                    
+                    # adding to stats
+                    for p in zip(new_tokens, new_tokens[1:]):
+                        stats[p] = stats.get(p, 0) + freq
+                else:
+                    new_word_counts[word_tokens] = freq
+            
+            # refreshing word counts
+            word_counts = new_word_counts
+            stats = {p: f for p, f in stats.items() if f > 0}
+
+    # saving if pair
+    def _merge(self, tokens, pair, idx):
+        new_tokens = []
+        i = 0
+        while i < len(tokens):
+            if i < len(tokens) - 1 and (tokens[i], tokens[i+1]) == pair:
+                new_tokens.append(idx)
+                i += 2
+            else:
+                new_tokens.append(tokens[i])
+                i += 1
+        return tuple(new_tokens)
+
+    # simple lookup in cache
+    def encode(self, text):
+        if text in self.cache: return self.cache[text]
+        word_chunks = re.findall(self.split_pattern, text)
+        final_ids = []
+        for word in word_chunks:
+            final_ids.extend(self._encode_word(word))
+        
+        self.cache[text] = final_ids
+        return final_ids
+
+    # encoding every word
+    def _encode_word(self, word):
+        tokens = list(word.encode('utf-8'))
+        
+        while len(tokens) >= 2:
+            best_pair = None
+            min_idx = float('inf')
+            for i in range(len(tokens) - 1):
+                pair = (tokens[i], tokens[i+1])
+                # here checking in rules
+                idx = self.merges.get(pair)
+                if idx is not None and idx < min_idx:
+                    best_pair = pair
+                    min_idx = idx
+            
+            if best_pair is None:
+                break
+            tokens = list(self._merge(tokens, best_pair, min_idx))
+        return tokens
+
+    # decoding from utf
+    def decode(self, ids):
+        return b"".join(self.vocab.get(i, b"<?>") for i in ids).decode('utf-8', errors='replace')
+
+def debug(name, tensor): print(f'debug [{name}]: shape={list(tensor.shape)} | mean={tensor.mean().item():.4f}')
+
+def get_batch(dataset, length, batch_size):
+    # 5 as 1 too little and 10 too much
+    ix = torch.randint(len(dataset) - length - 5, (batch_size,), device='cpu')
+    full = ix.unsqueeze(1) + torch.arange(length + 2)
+    # using numpy as torch often lags or breaks
+    raw = torch.from_numpy(dataset[full]).long()
+    # view without copies
+    x = raw.narrow(1, 0, length)
+    y1 = raw.narrow(1, 1, length)
+    y2 = raw.narrow(1, 2, length)
+    return x, y1, y2
+
+# if i want to
+def solidify(model):
+    print("\n-> SOLIDIFYING CORE: Migrating to INT8 for Ryzen 3...")
+    model.eval()
+    qmodel = torch.ao.quantization.quantize_dynamic(
+        model, {nn.Linear}, dtype=torch.qint8)
+    return qmodel
+
+HISTORY = []
+def print_sovereign_report(step, loss, experts_usage):
+    mem = psutil.virtual_memory().percent
+    HISTORY.append(loss.item())
+    if len(HISTORY) > 100:
+        HISTORY.pop(0)
+    std = np.std(HISTORY) if len(HISTORY) > 1 else 0
+    # weirdness
+    entropy = -np.sum(np.array(experts_usage) * np.log(np.array(experts_usage) + 1e-9))
+    # delta of first 10 and last 10
+    if len(HISTORY) >= 20:
+        start_avg = np.mean(HISTORY[:10])
+        end_avg = np.mean(HISTORY[-10:])
+        delta = start_avg - end_avg
+    else:
+        delta = 0
+    print(f"\n--- SOVEREIGN PERFORMANCE REPORT ---")
+    print(f"Step: {step} | Loss: {loss:.4f} | RAM: {mem}")
+    print(f"Stability (STD): {std:.4f} | Velocity (Delta): {delta:.4f}")
+    print(f"Expert Diversity (Entropy): {entropy:.4f}")
+    print(f'Expert Spread (STD): {np.std(experts_usage):.2f}')
+    print(f"Hardware Status: Stable (Ryzen 3 Optimized)")
+    print(f"------------------------------------\n")
+
+def loadbalance(routes, experts, training=False):
+    valid_routes = [r for r in routes if r is not None]
+    if not valid_routes: return 0
+    allroutes = torch.cat([r.view(-1, experts) for r in valid_routes])
+    importance = allroutes.mean(dim=0)
+    if training:
+        # the same importance as we need differentiable
+        load = allroutes.mean(dim=0)
+    else:
+        # taking only one for each
+        indices = torch.argmax(allroutes, dim=-1)
+        load = torch.zeros(experts, device=allroutes.device)
+        # vectorized on all at once
+        load.scatter_add_(0, indices, torch.ones_like(indices, dtype=torch.float))
+        # we look at percentage
+        load = load / load.sum()
+    loss = experts * torch.sum(importance * load)
+    return loss
+
+# 10 is max to sit in my ram
+data_queue = Queue(maxsize=10) 
+def loader_thread(data, block, batch):
+    # while loader_threads logic still works
+    while True:
+        x, y1, y2 = get_batch(data, block, batch)
+        data_queue.put((x, y1, y2))
+
+# load vocab
+def love(path, tokens, rules):
+    # initializing tokenizer
+    tokenizer = bpe(4096)
+    # dataset in .parquet
+    if path.endswith('.parquet'):
+        df = pd.read_parquet(path, columns=['text'])
+        text = ' '.join(df['text'].values)
+    # if we have both rules and tokens
+    if os.path.exists(tokens) and os.path.exists(rules):
+        token_data = np.load(tokens)
+        with open(rules, 'rb') as f:
+            state = pickle.load(f)
+            tokenizer.merges = state['merges']
+            tokenizer.vocab = state['vocab']
+    # if no rules or tokens then train everything and save
+    else:        
+        with open(path, "r", encoding="utf-8") as f: 
+            text = f.read().lower()
+        tokenizer.train(text)
+        with open(rules, 'wb') as f:
+            pickle.dump({'merges': tokenizer.merges, 'vocab': tokenizer.vocab}, f)
+        token_data = np.array(tokenizer.encode(text), dtype=np.uint16)
+        np.save(tokens, token_data)
+    return tokenizer, token_data
+
+# i dont want it to be included into graph
+@torch.no_grad()
+def val(model, data, batch, block, iters, device, dtype):
+    model.eval()
+    losses = torch.zeros(iters)
+    print(f'-> VALIDATING: Sampling {iters} batches...')
+    for k in range(iters):
+        xb, yb1, _ = get_batch(data, block, batch)
+        # doing in 16 if possible
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
+            logits, _, _, _, _, _ = model(xb, step=0, tau=0.1)
+            loss = F.cross_entropy(logits.view(-1, 4096), yb1.view(-1))
+            losses[k] = loss.item()
+        # freeing xb and yb1 spaces now
+        del xb, yb1
+    model.train()
+    return losses.mean()
+
+class rms(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        # regulatory param to give space for model
+        self.weight = nn.Parameter(torch.ones(dim))
+    
+    def forward(self, x):
+        # rsqrt pow2 can be done only in float32
+        x = x.to(torch.float32)
+        # [B, T, 256] -> [B, T, 256]
+        normx = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return normx.to(torch.float16) * self.weight
+
+class fsqlora(nn.Module):
+    def __init__(self, base_linear, rank=4, alpha=1.0, levels=[8, 5, 5]):
+        super().__init__()
+        self.base_linear = base_linear
+        self.levels = levels
+        self.rank = rank
+        self.scaling = alpha / rank
+        # lora
+        self.loraa = nn.Parameter(torch.empty(base_linear.in_features, rank))
+        self.lorab = nn.Parameter(torch.empty(rank, base_linear.out_features))
+        # radix
+        basis = torch.ones(len(levels), dtype=torch.long)
+        for i in range(1, len(levels)):
+            basis[i] = basis[i-1] * levels[i-1]
+        self.register_buffer("basis", basis)
+        nn.init.kaiming_uniform_(self.loraa, a=math.sqrt(5))
+        nn.init.zeros_(self.lorab)
+
+    def get_adapted_weight(self, out_slice=None, in_slice=None):
+        # 1. slicing automated
+        w = self.base_linear.weight
+        if out_slice is not None or in_slice is not None:
+            w = w[:out_slice, :in_slice]
+        # 2. FSQ + STE (Rounding like in bit)
+        z_q = torch.round(w + (torch.randn_like(w) - 0.5)).clamp(0, len(self.levels) - 1)
+        wq = w + (z_q - w).detach()
+        # 3. LoRA Delta (lorab @ loraa.T)
+        # Slicing A and B to match the active weight dims
+        l_a = self.loraa[:in_slice, :] if in_slice else self.loraa
+        l_b = self.lorab[:, :out_slice] if out_slice else self.lorab
+        lora_delta = (l_b @ l_a.t()) * self.scaling
+        return wq + lora_delta
+    # Helper for quantizing activations (xactive)
+    def quantize_val(self, x, levels):
+        z_q = torch.round(x + (torch.randn_like(x) - 0.5)).clamp(0, len(levels) - 1)
+        return x + (z_q - x).detach()
+
+class mrrope(nn.Module):
+    def __init__(self, rdim, len=512):
+        super().__init__()
+        # all spectrum
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, rdim, 2).float() / rdim))
+        # range of len
+        t = torch.arange(len).float()
+        # putting range onto that spectrum
+        freqs = torch.outer(t, inv_freq)
+        # preparing for both cos and sin
+        emb = torch.cat((freqs, freqs), dim=-1)
+        # registering static universe
+        self.register_buffer("cos", emb.cos().view(1, len, rdim))
+        self.register_buffer("sin", emb.sin().view(1, len, rdim))
+    
+    def rotatehalf(self, x, c, s):
+        # chunk much faster than interleaved
+        x1, x2 = x.chunk(2, dim=-1)
+        # multiplying everything in cat is much more tactical
+        return torch.cat([x1 * c - x2 * s, x2 * c + x1 * s], dim=-1)
+    
+    def forward(self, q, k):
+        T = q.shape[1]
+        # [1, T, 384] -> [1, T, 1, 384]
+        # by :T we save ram
+        cos = self.cos[:, :T, :].unsqueeze(2).to(q.dtype)
+        sin = self.sin[:, :T, :].unsqueeze(2).to(q.dtype)
+        # [B, T, H, 384] * [1, T, 1, 384] -> [B, T, H, 384]
+        return self.rotatehalf(q, cos, sin), self.rotatehalf(k, cos, sin)
+
+class newmla(nn.Module):
+    def __init__(self, emb, n_heads=8, latent_dim=64, rope_dim=32):
+        super().__init__()
+        self.latent = latent_dim
+        self.n_heads = n_heads
+        # dim on 1 head
+        self.head_dim = emb // n_heads
+        self.rope_dim = rope_dim
+        # norm before up
+        self.norm = rms(emb)
+        # Wrapping projections in fsqlora to enable LoRA adapters + Quantized base
+        self.kv_down = fsqlora(nn.Linear(emb, latent_dim, bias=False))
+        self.kv_up = fsqlora(nn.Linear(latent_dim, n_heads * (self.head_dim + rope_dim + self.head_dim), bias=False))
+        # better to init one big then split
+        self.q_proj = fsqlora(nn.Linear(emb, n_heads * (self.head_dim + rope_dim), bias=False))
+        self.out_proj = fsqlora(nn.Linear(n_heads * self.head_dim, emb, bias=False))
+        # ultimate scale of content + position
+        self.scale = (self.head_dim + rope_dim) ** -0.5
+        # 0.1 as i want normal distribution in kvdown
+        # Accessing .base_linear.weight because fsqlora wraps the layer
+        nn.init.xavier_uniform_(self.kv_down.base_linear.weight, gain=0.1)
+        nn.init.xavier_uniform_(self.kv_up.base_linear.weight)
+        nn.init.xavier_uniform_(self.q_proj.base_linear.weight)
+        # final residual
+        nn.init.xavier_uniform_(self.out_proj.base_linear.weight, gain=0.02)
+
+    def forward(self, x, rope_obj, active4, grid_levels=[8, 5, 5]):
+        # [B, T, 384]
+        B, T, _ = x.shape
+        # slicing input to matryoshka size
+        x = x[:, :, :active4]
+        # bit them - Quantizing input activation
+        xactive = self.kv_down.quantize_val(x, levels=[16, 16, 16])
+        # Getting Adapted Weights (Quantized Base Weight + LoRA Delta)
+        # Slicing is handled inside get_adapted_weight to match Matryoshka/Latent dims
+        wq_down = self.kv_down.get_adapted_weight(out_slice=self.latent, in_slice=active4)
+        wq_up = self.kv_up.get_adapted_weight(out_slice=None, in_slice=self.latent)
+        wq_proj = self.q_proj.get_adapted_weight(out_slice=None, in_slice=active4)
+        # [B, T, 384] * [384, 64] -> [B, T, 64]
+        # compressing x down to save ram
+        # Using F.linear with our combined wq_down weight
+        z_latent = self.kv_down.quantize_val(self.norm(F.linear(xactive, wq_down)), levels=grid_levels)
+        # [B, T, 64] * [64, H * (32 + 32 + 32)] -> [B, T, H, 96]
+        # here slicing up weight too as we need all weights to be sliced
+        kv_up = F.linear(z_latent, wq_up).view(B, T, self.n_heads, -1)
+        # [B, T, H, 96] -> [B, T, H, 32] + [B, T, H, 32] + [B, T, H, 32]
+        k_content, k_pe, v = torch.split(kv_up, [self.head_dim, self.rope_dim, self.head_dim], dim=-1)
+        # [B, T, 384] * [384, H * (32 + 32)] -> [B, T, H, 64]
+        q_up = F.linear(xactive, wq_proj).view(B, T, self.n_heads, -1)
+        # [B, T, H, 64] -> [B, T, H, 32] + [B, T, H, 32]
+        q_content, q_pe = torch.split(q_up, [self.head_dim, self.rope_dim], dim=-1)
+        # i only rotate pe part
+        q_pe, k_pe = rope_obj(q_pe, k_pe)
+        # [B, T, H, 32] + [B, T, H, 32] -> [B, T, H, 64]
+        q, k = torch.cat([q_content, q_pe], dim=-1), torch.cat([k_content, k_pe], dim=-1)
+        # [B, T, H, 64] -> [B, H, T, 64]
+        q = q.transpose(1, 2)
+        # [B, T, H, 64] -> [B, H, T, 64]
+        k = k.transpose(1, 2)
+        # [B, T, H, 32] -> [B, H, T, 32]
+        v = v.transpose(1, 2) 
+        # [B, H, T, T] * [B, H, T, 32] -> [B, H, T, 32]
+        # sdpa replaces softmax, mask and operations like einsum and scale
+        out = F.scaled_dot_product_attention(
+            q, k, v, 
+            is_causal=True, 
+            scale=self.scale
+        ) 
+        # [B, H, T, 32] -> [B, T, H, 32] -> [B, T, 384]
+        # transpose+reshape are glued to next and they only change stride
+        # slicing too
+        out = out.transpose(1, 2).reshape(B, T, -1)
+        # Get adapted weight for output projection
+        wo_proj = self.out_proj.get_adapted_weight(out_slice=None, in_slice=None)
+        return F.linear(out, wo_proj)
+
+class moe(nn.Module):
+    def __init__(self, emb, experts, latent_dim=None):
+        super().__init__()
+        self.experts = experts
+        self.kv_dim = latent_dim or (emb // 4)
+        # Wrapping each expert's up and down projection in fsqlora
+        # This allows each expert to have its own LoRA adapter
+        self.w_q = nn.ModuleList([
+            fsqlora(nn.Linear(emb, self.kv_dim, bias=False)) 
+            for _ in range(experts)
+        ])
+        self.w_o = nn.ModuleList([
+            fsqlora(nn.Linear(self.kv_dim, emb, bias=False)) 
+            for _ in range(experts)
+        ])
+        # added regulatory parameter for router to choose
+        self.bias = nn.Parameter(torch.zeros(experts))
+        # Norm for the bottleneck
+        self.norm = rms(self.kv_dim)
+        nn.init.constant_(self.bias, -1.0)
+        # Initialization using the base_linear within the fsqlora wrapper
+        with torch.no_grad():
+            for e in range(experts):
+                nn.init.xavier_uniform_(self.w_q[e].base_linear.weight, gain=0.1)
+                # again 0.02 used for final residual layer
+                nn.init.xavier_uniform_(self.w_o[e].base_linear.weight, gain=0.02)
+
+    def forward(self, x, route_soft, active4=None, grid_levels=[2, 2]):
+        # [B, T, 384]
+        B, T, C = x.shape
+        # [B, T, C] -> [B*T, C]
+        x_flat = x.view(-1, C)
+        # bit activations - using the quantization helper from one of the fsqlora instances
+        x_q = self.w_q[0].quantize_val(x_flat, levels=[16, 16, 16]) 
+        # Slicing logic for Matryoshka MoE
+        kv_slice = max(32, active4 // 4)
+        # Calculate Router probabilities
+        probs = F.softmax((route_soft + self.bias), dim=-1) # [B*T, Experts]
+        expert_outputs = []
+        for e in range(self.experts):
+            # 1. Get adapted weights for this expert (Quantized + LoRA)
+            # wq_q: [kv_slice, active4]
+            wq_q = self.w_q[e].get_adapted_weight(out_slice=kv_slice, in_slice=active4)
+            # wo_q: [active4, kv_slice]
+            wo_q = self.w_o[e].get_adapted_weight(out_slice=active4, in_slice=kv_slice)
+            # 2. Expert Path
+            # [B*T, active4] @ [active4, kv_slice] -> [B*T, kv_slice]
+            mid = F.linear(x_q[:, :active4], wq_q)
+            mid = F.silu(self.norm(mid))
+            # [B*T, kv_slice] @ [kv_slice, active4] -> [B*T, active4]
+            out_e = F.linear(mid, wo_q)
+            expert_outputs.append(out_e.unsqueeze(1)) # [B*T, 1, active4]
+        # Combine all expert outputs
+        # [B*T, Experts, active4]
+        all_outs = torch.cat(expert_outputs, dim=1)
+        # gate_flat: [B*T, Experts, 1]
+        gate_flat = probs.view(B*T, self.experts, 1)
+        # weighted sum across experts: [B*T, 1, active4]
+        final_output = torch.bmm(gate_flat.transpose(1, 2), all_outs)
+        # [B*T, 1, active4] -> [B, T, active4]
+        return final_output.view(B, T, active4)
+
+class lnn(nn.Module):
+    def __init__(self, emb):
+        super().__init__()
+        # emb * 2 as it takes two inputs
+        # Wrapping in fsqlora for bitted weights + LoRA
+        self.dt = fsqlora(nn.Linear(emb * 2, emb))
+        # Accessing .base_linear.weight because of the wrapper
+        nn.init.xavier_uniform_(self.dt.base_linear.weight)
+        # -2 is a good gating
+        nn.init.constant_(self.dt.base_linear.bias, -2.0)
+
+    def forward(self, h, combined_context, active4=None):
+        h = h[:, :, :active4]
+        combined_context = combined_context[:, :, :active4]
+        combined = torch.cat([combined_context, h], dim=-1)
+        # Get adapted weight with specific Matryoshka slicing
+        # active4*2 for the concatenated input, active4 for output
+        wq_dt = self.dt.get_adapted_weight(out_slice=active4, in_slice=active4*2)
+        # [384] @ [384] -> [384]
+        # Using F.linear with bitted+lora weight and sliced bias
+        dt_logits = F.linear(combined, wq_dt, self.dt.base_linear.bias[:active4])
+        dt = torch.sigmoid(dt_logits)
+        # [384] + ([384] - [384]) * [384] -> [384]
+        # tanh used for bigger spectrum
+        return h + (-h + torch.tanh(combined_context)) * dt
+
+class swigluznn(nn.Module):
+    def __init__(self, emb):
+        super().__init__()
+        hidden_dim = int(8/3 * emb)
+        # better to init one and split then two
+        self.w_combined = fsqlora(nn.Linear(emb, hidden_dim * 2, bias=False))
+        self.w_down = fsqlora(nn.Linear(hidden_dim, emb, bias=False))
+        with torch.no_grad():
+            # 0.1 for gate
+            nn.init.xavier_uniform_(self.w_combined.base_linear.weight[:hidden_dim], gain=0.1)
+            nn.init.xavier_uniform_(self.w_down.base_linear.weight, gain=0.02)
+            # 1.0 for up
+            nn.init.xavier_uniform_(self.w_combined.base_linear.weight[hidden_dim:])
+
+    def forward(self, x, active4=None):
+        # Slice output to 2 * hidden_dim, input to active4
+        # Note: If hidden_dim scales with active4, adjust out_slice accordingly
+        wq_combined = self.w_combined.get_adapted_weight(out_slice=None, in_slice=active4)
+        combined = F.linear(x[:, :, :active4], wq_combined)
+        gate, up = torch.chunk(combined, 2, dim=-1)
+        # [B, T, 682] * [B, T, 682] -> [B, T, 682]
+        # silu used for smoothness
+        hff = F.silu(gate) * up
+        # Down project
+        wq_down = self.w_down.get_adapted_weight(out_slice=active4, in_slice=None)
+        # [B, T, 682] @ [682, 256] -> [B, T, 256]
+        return F.linear(hff, wq_down)
+
+class lru(nn.Module):
+    def __init__(self, emb, d_state=16):
+        super().__init__()
+        self.emb = emb
+        self.d_state = d_state
+        self.dt_rank = 16
+        # Grouped conv stays standard as it's small/specialized
+        self.conv1d = nn.Conv1d(emb, emb, kernel_size=4, groups=emb, padding=3)
+        # Wrap projections
+        self.x_proj = fsqlora(nn.Linear(emb, self.dt_rank + d_state * 2, bias=False))
+        self.dt_proj = fsqlora(nn.Linear(self.dt_rank, emb, bias=True))
+        self.A_log = nn.Parameter(torch.log(torch.arange(1, emb + 1).float()))
+        self.state_norm = rms(d_state) 
+        nn.init.normal_(self.dt_proj.base_linear.weight, mean=0.0, std=0.01)
+        nn.init.dirac_(self.conv1d.weight)
+        nn.init.orthogonal_(self.x_proj.base_linear.weight, gain=0.02)
+        nn.init.constant_(self.dt_proj.base_linear.bias, -2.0)
+        with torch.no_grad():
+            self.A_log.copy_(torch.log(torch.linspace(0.001, 0.1, emb)))
+
+    def forward(self, x, training=False, active4=None):
+        B_size, T, E = x.shape
+        x = x[:, :, :active4]
+        # Convolutional path
+        # Slicing conv weights manually as fsqlora isn't applied to conv here
+        x_conv = F.conv1d(x.transpose(1, 2), self.conv1d.weight[:active4, :1, :], 
+                          groups=active4, padding=3).transpose(1, 2)
+        x_active = F.silu(x_conv[:, :T, :]) # Ensure T length matches
+        # 1. Project to ranks (B, C, DT)
+        wq_x = self.x_proj.get_adapted_weight(out_slice=None, in_slice=active4)
+        x_db = F.linear(x_active, wq_x)
+        dt_raw, b_vals, c_vals = torch.split(x_db, [self.dt_rank, self.d_state, self.d_state], dim=-1)
+        # 2. Project DT to embedding dim
+        wq_dt = self.dt_proj.get_adapted_weight(out_slice=active4, in_slice=None)
+        dtlinear = F.linear(dt_raw, wq_dt, self.dt_proj.base_linear.bias[:active4])
+        dt = torch.exp(dtlinear).clamp(max=0.1)
+        A = -torch.exp(self.A_log[:active4].float())
+        if training:
+            log_decay = dt * A.view(1, 1, -1) 
+            cum_decay = torch.cumsum(log_decay, dim=1).unsqueeze(-1) 
+            term = (x_active * dt).unsqueeze(-1) * b_vals.unsqueeze(2) 
+            u_discounted = term * torch.exp(-cum_decay)
+            history = torch.cumsum(u_discounted, dim=1)
+            state = history * torch.exp(cum_decay)
+            y = (state * c_vals.unsqueeze(2)).sum(dim=-1)
+            return y
+        else: 
+            state = torch.zeros(B_size, active4, self.d_state, device=x.device, dtype=x.dtype)
+            y_out = torch.empty(B_size, T, active4, device=x.device, dtype=x.dtype)
+            for t in range(T): 
+                dt_t = dt[:, t, :].unsqueeze(-1) 
+                b_t = b_vals[:, t, :].unsqueeze(1) 
+                c_t = c_vals[:, t, :].unsqueeze(-1) 
+                x_t = x_active[:, t, :].unsqueeze(-1)
+                
+                decay = torch.exp(dt_t * A.view(1, -1, 1))
+                state = state * decay + (dt_t * x_t * b_t)
+                state = self.state_norm(state) 
+                y_t = torch.matmul(state, c_t).squeeze(-1)
+                y_out[:, t, :] = y_t
+            return y_out
+
+class heads(nn.Module):
+    def __init__(self, emb, vocab, spec_count):
+        super().__init__()
+        self.embed = nn.Embedding(vocab, emb)
+        self.spec_count = spec_count
+        # Norms
+        self.norm_f = rms(emb)
+        self.norm_mtp = rms(emb)
+        # Wrapped Projections
+        self.gate = fsqlora(nn.Linear(emb, emb))
+        self.pred_state = fsqlora(nn.Linear(emb, emb))
+        # Multi-Token Prediction Heads
+        self.spec_heads = nn.ModuleList([
+            fsqlora(nn.Linear(emb, emb)) for _ in range(spec_count)
+        ])
+        # Final classifier (tied to embed)
+        # We don't wrap this in fsqlora because of weight tying, 
+        # but we use opo_linear for memory efficiency.
+        self.vim = nn.Linear(emb, 1)
+        # Inits
+        nn.init.normal_(self.embed.weight, mean=0.0, std=0.02)
+        nn.init.xavier_uniform_(self.gate.base_linear.weight, gain=0.1)
+        nn.init.constant_(self.gate.base_linear.bias, -1.0)
+        for h in self.spec_heads:
+            nn.init.xavier_uniform_(h.base_linear.weight, gain=0.1)
+
+    def opo_linear(self, x, weight, chunks=4):
+        # [V, E] chunked for memory efficiency
+        vocab_chunks = torch.chunk(weight, chunks, dim=0)
+        logits = [F.linear(x, w_c) for w_c in vocab_chunks]
+        return torch.cat(logits, dim=-1)
+
+    def forward(self, h_final, i4=None, active4=None, grid_levels=[8, 5, 5]):
+        # [B, T, active4]
+        # Quantize inputs using the helper from one of the fsqlora instances
+        h_norm = self.gate.quantize_val(self.norm_f(h_final[:, :, :active4]), levels=[16, 16, 16])
+        i4_norm = self.gate.quantize_val(self.norm_f(i4[:, :, :active4]), levels=[16, 16, 16])
+        # 1. Gate Logic
+        wq_gate = self.gate.get_adapted_weight(out_slice=active4, in_slice=active4)
+        g = torch.sigmoid(F.linear(h_norm, wq_gate, self.gate.base_linear.bias[:active4]))
+        # 2. Prediction State
+        wq_pred = self.pred_state.get_adapted_weight(out_slice=active4, in_slice=active4)
+        ph = F.linear(i4_norm, wq_pred)
+        # [B, T, active4]
+        # logic to determine final context before prediction
+        combined_context = h_norm + (ph - h_norm) * g
+        
+        # [B, T, active4] -> [B, T, vocab]
+        # Using weight tying with the embedding layer
+        logits = self.opo_linear(combined_context, self.embed.weight[:, :active4])
+        
+        # Multi-Token Prediction (MTP) logic
+        spec_logits = []
+        for i, head in enumerate(self.spec_heads):
+            # Getting adapted weight for each specific head
+            wq_head = head.get_adapted_weight(out_slice=active4, in_slice=active4)
+            # Projecting current context to future token space
+            spec_h = F.linear(combined_context, wq_head)
+            spec_h = self.norm_mtp(spec_h)
+            # Classifier for spec heads tied to same embedding
+            sl = self.opo_linear(spec_h, self.embed.weight[:, :active4])
+            spec_logits.append(sl)
+            
+        return logits, spec_logits, combined_context, g, probs, entropy
+
+class layer(nn.Module):
+    def __init__(self, i, emb, experts):
+        super().__init__()
+        self.i = i
+        self.lnn = lnn(emb)
+        self.norm1 = rms(emb)
+        self.norm2 = rms(emb)
+        self.rope = mrrope(rdim=32)
+        self.smallparam = nn.Parameter(torch.ones(emb) * 0.1)
+        # Expert vs SwiGLU logic
+        if i % 2 == 0:
+            self.is_expert = True
+            self.branch = moe(emb, experts)
+            # Router also uses fsqlora for consistency
+            self.router = fsqlora(nn.Linear(emb, experts, bias=False))
+            nn.init.orthogonal_(self.router.base_linear.weight, gain=0.01)
+        else:
+            self.is_expert = False
+            self.branch = swigluznn(emb)
+        # Global (MLA) vs Local (LRU) logic
+        if i % 3 == 0:
+            self.is_global = True
+            self.mla = newmla(emb)
+        else:
+            self.is_global = False
+            self.lrussd = lru(emb)
+
+    def forward(self, h, lrustate, tau, training=False, active4=None):
+        hnorm1 = self.norm1(h)
+        hnorm2 = self.norm2(h)
+        # 1. Context Branch
+        if self.is_global:
+            h_context = self.mla(hnorm1, self.rope, active4)
+            next_state = None
+        else:
+            h_context, next_state = self.lrussd(lrustate, hnorm1, active4)
+        h_context = h + h_context
+        # 2. Feedforward / MoE Branch
+        if self.is_expert:
+            # Get adapted router weight
+            wq_router = self.router.get_adapted_weight(out_slice=None, in_slice=active4)
+            logits = F.linear(hnorm2[:, :, :active4], wq_router)
+            logits = torch.clamp(logits, -30.0, 30.0)
+            if training:
+                route = F.gumbel_softmax(logits, tau=tau, hard=not training)
+            else:
+                route = logits.argmax(-1)
+            combined_context = self.branch(hnorm2, route, active4)
+        else:
+            combined_context = self.branch(hnorm2, active4) 
+            route = None
+        # 3. Liquid Fusion
+        h_liquid = self.lnn(h_context, combined_context, active4)
+        return h + (h_liquid * self.smallparam[:active4]), next_state, route
+
+class model(nn.Module):
+    def __init__(self, vocab, emb, n_layers, n_experts, spec_count=2):
+        super().__init__()
+        self.emb = emb
+        self.embed = nn.Embedding(vocab, emb)
+        self.layers = nn.ModuleList([layer(i, emb, n_experts) for i in range(n_layers)])
+        self.heads = heads(emb, vocab, spec_count)
+        nn.init.normal_(self.embed.weight, std=0.02)
+        # Adjusting the MTP input mix param
+        self.mtpmix = nn.Parameter(torch.ones(emb) * 0.5)
+
+    def forward(self, x, lru_states=None, tau=1.0, active4=64):
+        # Scale embedding
+        h = self.embed(x) * (self.emb ** 0.5)
+        if lru_states is None: 
+            lru_states = [None] * len(self.layers)
+        routes = []
+        new_states = []
+        # First layer pass to establish i4 (residual anchor)
+        h, ns, r = self.layers[0](h, lru_states[0], tau, active4=active4)
+        i4 = h.clone()
+        new_states.append(ns)
+        if r is not None: routes.append(r)
+        # Core stack
+        for i in range(1, len(self.layers)):
+            h, ns, r = self.layers[i](h, lru_states[i], tau, active4=active4)
+            new_states.append(ns)
+            if r is not None: routes.append(r)
+        # MTP Mixing
+        h = h + (i4 * self.mtpmix[:active4])
+        # Heads
+        l1, spec, ph, h_final = self.heads(h, i4, active4)
+        return l1, spec, ph, h_final, new_states, routes
+
+class generate(nn.Module):
+    def __init__(self, model, tokenizer, length, tmp, topk, penalty):
+        super().__init__()
+        self.model = model
+        self.tokenizer = tokenizer
+        self.length = length
+        self.tmp = max(tmp, 1e-6) 
+        self.topk = topk
+        self.penalty = penalty
+
+    @torch.no_grad()
+    def forward(self, prompt, active4=384): # Default to full dimension
+        self.model.eval()
+        device = next(self.model.parameters()).device
+        input_ids = self.tokenizer.encode(prompt)
+        tokens = torch.tensor([input_ids], dtype=torch.long, device=device)
+        lru_state = [None] * len(self.model.layers)
+        print('\nmodel: ', end='', flush=True)
+        history = []
+        pen_indices = torch.arange(16, device=device)
+        decay = torch.exp(-pen_indices / 3.0) * self.penalty
+        for _ in range(self.length):
+            # Model returns: l1, spec_chain, ph, h_final, new_states, routes
+            out = self.model(tokens, lru_states=lru_state, active4=active4)
+            logits1 = out[0][:, -1, :]
+            spec_logits_list = out[1]
+            lru_state = out[4]
+            # 1. Repetition Penalty
+            if len(history) > 0:
+                h_slice = torch.tensor(history[-16:], device=device)
+                logits1[0].index_add_(0, h_slice, -decay[:len(history[-16:])])
+                token_counts = torch.bincount(torch.tensor(history[-128:], device=device), minlength=self.model.vocab)
+                logits1[0] -= (token_counts.float() ** 1.1) * 0.15
+            # 2. Dynamic Temperature via Entropy
+            probs_check = F.softmax(logits1 / 2.0, dim=-1)
+            entropy = -torch.sum(probs_check * torch.log(probs_check + 1e-9))
+            dtmp = torch.clamp(self.tmp + (1.0 / (entropy + 0.5)), self.tmp, 1.5)
+            logits1 = logits1 / dtmp
+            # 3. Top-K Filtering
+            top_v, _ = torch.topk(logits1, self.topk) 
+            logits1[logits1 < top_v[:, [-1]]] = -65504.0 # Float16 min
+            # 4. Sampling & Speculative Acceptance
+            probs = F.softmax(logits1, dim=-1)
+            next_token_tensor = torch.multinomial(probs, num_samples=1)
+            next_token = next_token_tensor.item()
+            accepted_tokens = [next_token]
+            history.append(next_token)
+            print(self.tokenizer.decode([next_token]), end='', flush=True)
+            # Speculative chain verification
+            for future_logits in spec_logits_list:
+                f_logits = future_logits[:, -1, :]
+                f_probs = F.softmax(f_logits, dim=-1)
+                conf, best_token = torch.max(f_probs, dim=-1)
+                # Heuristic: only accept if confidence is high (low 'cost')
+                cost = 1.0 / (conf.item() + 1e-5)
+                if cost <= 2.0: # Tightened threshold for speculative chain
+                    t_idx = best_token.item()
+                    accepted_tokens.append(t_idx)
+                    history.append(t_idx)
+                    print(self.tokenizer.decode([t_idx]), end='', flush=True)
+                else:
+                    break
+            # Update tokens for next pass with the last accepted token
+            tokens = torch.tensor([[accepted_tokens[-1]]], dtype=torch.long, device=device)
+        return history
+
+vocab, emb, layers, experts = 4096, 384, 4, 4
+block, batch, baselr, minlr, accum = 128, 4, 1.0e-4, 1.0e-5, 16
+inittau, mintau, steps, warmup = 1.0, 0.1, 15001, 0
+
+save = None
+dtype = torch.bfloat16
+device = torch.device('cpu')
+gpt = model(vocab, emb, layers, experts).to(device)
+# changes contiguous to l3 convinient
+gpt = gpt.to(memory_format=torch.channels_last)
+# more optimized
+gpt = torch.utils.mkldnn.to_mkldnn(gpt)
+# if i had cuda
+scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() else None
+checkpoint_path = "C:\\Users\\user\\Downloads\\sovereign_solid.pt"
+print("\n[CORE MANAGEMENT]")
+action = input("Inference or not? ").lower()
+
+# if inference then only rules and load
+if os.path.exists(checkpoint_path) and action == 'i':
+    tokenizer3, token_data3 = love('C:\\Users\\user\\Downloads\\clean_train.txt', 'C:\\Users\\user\\Downloads\\tokenized_data3.npy', 'C:\\Users\\user\\Downloads\\tokenizer3.pkl')
+    chat_gpt = gpt._orig_mod if hasattr(gpt, '_orig_mod') else gpt
+    save = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    chat_gpt.load_state_dict(save['model_state_dict'])
+    chat_gpt.eval()
+    print("\n" + "="*30)
+    print(" SOVEREIGN INTERFACE ACTIVE ")
+    print(" (Type 'q' to close) ")
+    print("="*30)
+    while True:
+        u = input("\nYou: ").strip()
+        if u.lower() in ['exit', 'q']: break
+        generator = generate(chat_gpt, tokenizer3, length=50, tmp=1.0, topk=50 penalty=5.0)
+        generator(u)
+    sys.exit(0)
+
+# if not generate then i need train and val datasets
+tokenizer3, token_data3 = love('C:\\Users\\user\\Downloads\\clean_train.txt', 'C:\\Users\\user\\Downloads\\tokenized_data3.npy', 'C:\\Users\\user\\Downloads\\tokenizer3.pkl')
+tokenizer, token_data = love('C:\\Users\\user\\Downloads\\Sovereign_vocab.json', 'C:\\Users\\user\\Downloads\\tokenized_data.npy', 'C:\\Users\\user\\Downloads\\tokenizer.pkl')
+tokenizer2, token_data2 = love('C:\\Users\\user\\Downloads\\wikitext.parquet', 'C:\\Users\\user\\Downloads\\tokenized_data2.npy', 'C:\\Users\\user\\Downloads\\tokenizer2.pkl')
+    
+action3 = input()
+# if continuing then loading everything
+if action3 == 'c':
+    save = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if 'model_state_dict' in save:
+        state_dict = save['model_state_dict']
+    clean_weights = {}
+    for k, v in state_dict.items():
+        new_key = k.replace('_orig_mod.', '')
+        clean_weights[new_key] = v
+    msg = gpt.load_state_dict(clean_weights, strict=True)
+    print(f'-> Load Report: {msg}')
+    start_step = save.get('step', 0)
+    print(f"-> Full Checkpoint detected. Resuming from step {start_step}")
+
+    gpt = torch.compile(gpt)
+    params_dict = {n: p for n, p in model.named_parameters() if p.requires_grad}
+    # Group 1: LoRA adapters and small params (Higher LR for adaptation)
+    lora_params = [p for n, p in params_dict.items() if 'lora' in n or 'smallparam' in n]
+    # Group 2: Biases, Norms, and A_log (Stable LR, no decay)
+    stable_params = [p for n, p in params_dict.items() if any(nd in n for nd in ['bias', 'norm', 'A_log'])]
+    # Group 3: Router (Very sensitive)
+    router_params = [p for n, p in params_dict.items() if 'router' in n]
+    optim_groups = [
+        {"params": lora_params, "weight_decay": 0.05, "lr": baselr},
+        {"params": stable_params, "weight_decay": 0.0, "lr": 1e-4},
+        {"params": router_params, "weight_decay": 0.01, "lr": baselr * 0.1}
+    ]
+    optimizer = torch.optim.AdamW(optim_groups)
+    start_time = time.time()
+    if save is not None and 'optimizer_state_dict' in save:
+        optimizer.load_state_dict(save['optimizer_state_dict'])
+        print("-> Momentum locked. Information preserved.")
+
+# if from scratch then loading nothing and compiling
+elif action3 == 'd':
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
+        print("!!! CORE PURGED: Starting fresh. !!!")
+        torch._dynamo.reset()
+        start_step = 0
+
+    gpt = torch.compile(gpt)
+    params_dict = {n: p for n, p in model.named_parameters() if p.requires_grad}
+    # Group 1: LoRA adapters and small params (Higher LR for adaptation)
+    lora_params = [p for n, p in params_dict.items() if 'lora' in n or 'smallparam' in n]
+    # Group 2: Biases, Norms, and A_log (Stable LR, no decay)
+    stable_params = [p for n, p in params_dict.items() if any(nd in n for nd in ['bias', 'norm', 'A_log'])]
+    # Group 3: Router (Very sensitive)
+    router_params = [p for n, p in params_dict.items() if 'router' in n]
+    optim_groups = [
+        {"params": lora_params, "weight_decay": 0.05, "lr": baselr},
+        {"params": stable_params, "weight_decay": 0.0, "lr": 1e-4},
+        {"params": router_params, "weight_decay": 0.01, "lr": baselr * 0.1}
+    ]
+    optimizer = torch.optim.AdamW(optim_groups)
+    start_time = time.time()
+    start_step = 0
+
+# if nothing from above then i dont need to start training
+else:
+    sys.exit(0)
+
+# data pipeline
+t = Thread(target=loader_thread, args=(token_data3, block, batch), daemon=True)
+t.start()
+writer = SummaryWriter('runs/expertiment')
+smoothed_loss = 0.0
+expert_usage_history = []
+
+total_loss = 0.0
+for i in range(start_step, steps):
+    step_start = time.time()
+    
+    # lr spectrum
+    if i < warmup:
+        curr_lr = baselr * (i / warmup)
+        curr_tau = inittau - (inittau - mintau) * (i / steps)
+    else:
+        progress = (i - warmup) / (steps - warmup)
+        curr_lr = minlr + 0.5 * (baselr - minlr) * (1 + np.cos(np.pi * progress))
+        curr_tau = mintau
+    # important to assign values to real optimizer
+    optimizer.param_groups[2]['lr'] = curr_lr
+    # decay and lru are too sensitive for full lr
+    optimizer.param_groups[1]['lr'] = curr_lr * 0.5
+    
+    batch_raw = data_queue.get()
+    # nonblocking=True allows not to wait
+    xb = batch_raw[0].to(device, non_blocking=True)
+    yb1 = batch_raw[1].to(device, non_blocking=True)
+    yb2 = batch_raw[2].to(device, non_blocking=True)
+    
+    # so autocast is automated float switches
+    with torch.amp.autocast(device_type=device.type, dtype=dtype):
+        scales = [64, 128, 256, 384]
+        accumloss = 0
+        for mdim in scales:
+            l1, spec_chain, ph, hf, _, routes = gpt(xb, step=i, tau=curr_tau, active4=mdim)
+            # standard for words prediction
+            loss_t1 = F.cross_entropy(l1.view(-1, vocab), yb1.view(-1))
+            # we take predstate output
+            l1future = gpt.heads.head_t1(gpt.heads.norm_f(ph))
+            accumloss += loss_t1 / len(scales)
+            if spec_chain:
+                for i, slogits in enumerate(spec_chain):
+                    # the same metric
+                    loss = F.cross_entropy(slogits.view(-1, vocab), yb2.view(-1))
+                    accumloss += (0.5 * loss)
+        if i > 25:
+            aux_loss = loadbalance(routes, experts)
+            router_logits = torch.cat([r for r in routes if r is not None], dim=0)
+            # safe and fluid way of doing softmax
+            z_loss = torch.logsumexp(router_logits, dim=-1).pow(2).mean()
+            # penalties 0.5 for second 0.02 for router nad 0.01 for stability
+            accumloss = accumloss + (0.02 * aux_loss + 0.01 * z_loss)
+        else:
+            accumloss = accumloss
+        loss = accumloss / accum
+    
+    # i added scaler but dont really need it
+    if scaler:
+        scaler.scale(loss).backward()
+    else:
+        loss.backward()
+    total_loss += loss.item()
+        
+    # only calling accum times
+    if (i + 1) % accum == 0:
+        # again if i had scaler idk
+        if scaler:
+            scaler.unscale_(optimizer)
+            # if any value > 0.5 clip
+            torch.nn.utils.clip_grad_value_(gpt.parameters(), clip_value=0.5)
+            # if sum value > 1.0 norm
+            torch.nn.utils.clip_grad_norm_(gpt.parameters(), max_norm=0.5)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_value_(gpt.parameters(), clip_value=0.5)
+            torch.nn.utils.clip_grad_norm_(gpt.parameters(), max_norm=0.5)
+            optimizer.step()
+        # deleting entirelly to clear up ram
+        optimizer.zero_grad(set_to_none=True)
+        # collecting old variables or references
+        gc.collect()
+        # would give holds of cuda space if i had it
+        torch.cuda.empty_cache()
+
+    # using with torch.no_grad() as we dont need graphs for printing
+    with torch.no_grad():
+        model.eval()
+        if i % 50 == 0: 
+            # only if not none
+            valid = [r.detach() for r in routes if r is not None]
+            usage = valid[-1].sum(dim=(0, 1)).cpu().float().numpy()
+            print_sovereign_report(i, loss.item(), usage)
+            writer.add_scalar(f'lr', curr_lr, i)
+            writer.add_scalar(f'Loss', total_loss / 200, i)
+            writer.add_scalar('Expert balance', usage.std(), i)
+            print(f'train loss: {total_loss / 200:.4f}')
+            total_loss = 0.0
+
+        # printing basic stuff
+        if i % 200 == 0 and i > start_step:
+            elapsed = time.time() - start_time
+            steps_done = i - start_step
+            if steps_done > 0:
+                sec_per_step = elapsed / steps_done
+                remaining_steps = steps - i
+                remaining_min = (remaining_steps * sec_per_step) / 60
+                min = elapsed / 60
+                print(f"\nGone Minutes: {min if min < 60 else min/60}")
+                print(f"\nPROGRESS: {i}/{steps} | Speed: {sec_per_step:.1f}s/step")
+                print(f"EST. REMAINING: {remaining_min:.1f} minutes ({remaining_min/60:.1f} hours)")
+
+            # as we do this every 200 we / on 200
+            vloss = val(gpt, token_data2, batch, block, 20, device, dtype)
+            vloss2 = val(gpt, token_data, batch, block, 20, device, dtype)
+            print(f'Wiki Loss {vloss:.4f} | Corpus Loss {vloss2:.4f}')
+
+            # frees data up
+            writer.flush()
+            # saving progress
+            temp_path = checkpoint_path + ".tmp"
+            checkpoint_model = gpt._orig_mod if hasattr(gpt, '_orig_mod') else gpt
+            torch.save({
+                'step': i,
+                'model_state_dict': checkpoint_model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': loss.item(),
+            }, temp_path)
+            os.replace(temp_path, checkpoint_path) 
+            print(f"CORE BACKUP SAVED.")
+        
+        # diagnostics
+        if i % 500 == 0 and i > start_step:
+            print(f'\n--- [STEP {i}] SOVEREIGN HEALTH REPORT ---')
+            has_grad = any(p.grad is not None for p in gpt.parameters())
+            print(f"SANITY CHECK: {'Gradients flowing' if has_grad else 'CRITICAL: NO GRADIENTS'}")
+
+            # first i check experts and kick
+            if 'routes' in locals() and routes:
+                all_router_probs = torch.cat([torch.softmax(r.view(-1, experts), dim=-1) for r in routes if r is not None])
+                # flatten as in generate
+                avg_usage = all_router_probs.mean(dim=0)
+                # check weirdness as in generate
+                entropy = -torch.sum(avg_usage * torch.log(avg_usage + 1e-10)).item()
+                writer.add_scalar('Metrics/Expert_Entropy', entropy, i)
+                all_params = dict(gpt.named_parameters())
+                for idx, usage in enumerate(avg_usage):
+                    if usage < (1.0 / experts) * 0.1:
+                        status = "IDLE (STARVING)"
+                        for name, param in all_params.items():
+                            if f'experts.{idx}.' in name:
+                                # adding noise to move it
+                                param.add_(torch.randn_like(param) * 0.001)
+                    
+                    elif usage > (1.0 / experts) * 1.5:
+                        # doing nothing as it will correct on its own
+                        status = 'OVERLOADED'
+                    else:
+                        status = "ACTIVE"
+                    print(f"Expert {idx}: [{status}] | Load: {usage:.2%} ")
+                    writer.add_scalar(f'Expert_Usage/Expert_{idx}', usage, i)
+
+            # i check overall norm alog router after kicking
+            for name, param in gpt.named_parameters():
+                writer.add_histogram(f'Weights/{name}', param, i)
+                if 'router' in name and param.grad is not None:
+                    gnorm = torch.norm(param.grad).item()
+                    # checking router entropy
+                    if gnorm > 10.0:
+                        print(f"!!! ROUTER UNSTABLE: {name} | Grad {gnorm:.2f} | Scaling...")
+                        # multiplying on 0.1 to stabilize
+                        param.grad.data.mul_(0.1)
+                if any(k in name for k in ['expert', 'router', 'A_log']):
+                    norm = torch.norm(param).item()
+                    # values must be > 1e-3
+                    if norm < 1e-3:
+                        print(f"!!! COLLAPSE: {name} | Kicking with Gaussian Noise...")
+                        param.add_(torch.randn_like(param) * 0.02)
+                    # if a_log becomes too big then we reset it
+                    if 'A_log' in name and param.mean() > -0.1:
+                        print(f"--- RESETTING LRU MEMORY: {name} ---")
+                        param.copy_(torch.linspace(-1.0, -2.0, param.size(0)).to(device))
+            
+            # now we check ram
+            ram_p = psutil.virtual_memory().percent
+            writer.add_scalar('System/RAM_Usage', ram_p, i)
+            if ram_p > 85:
+                print(f'RAM CRITICAL!!! RESETTING DYNAMO')
+                torch._dynamo.reset()
+            print(">>> [THERMAL GUARD] Cooling 120s")
+            time.sleep(120)
+            data_queue.get()
+            start_time += 120
+
+# whether to quantize or not
+print("\n--- TRAINING COMPLETE ---")
+actionf = input("Command: [quantize] model or just [q]uit? ").lower()
+if actionf == 'quantize':
+    if os.path.exists(checkpoint_path):
+        solidify(gpt)
+        torch.save(gpt._orig_mod.state_dict() if hasattr(gpt, '_orig_mod') else model.state_dict(), "C:\\Users\\user\\Downloads\\sovereign_quantized.pt")
+        print("-> quantized and saved as 'sovereign_quantized.pt'")
+elif actionf == 'q':
+    print('-> Just Quited')
