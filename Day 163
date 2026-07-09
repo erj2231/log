@@ -1,0 +1,1191 @@
+to be honest i didnt post a lot of things as e.g. my views on new optimizer (involving ttt,
+jacobi preconditioner etc) or architecture (imagine: wirtinger gates, holomorphic, mobius etc).
+and well why not to implement it RIGHT NOW? so ive started to go through all my ideas so far (i
+will show you a bit later) trying to unite them and use for my now full block model (with one 
+space without any layers etc). well what ive done was: first i tried to make it through
+symplectic cross term (eta * imag and real aprts) then nystrom for landmarks and fmm for zoom in
++ pade approximation in between rfft and irfft. then cayley with lie algebra and then paral 
+scan cumrprod then leapfrog, wirtinger grad, interference waves etc. but... i understood that 
+a lot of things are actually workin together? like qnext pnext for mimomagsq were in sync with 
+leapfrog or gate because of their nature, so i united diff blocks into one big list. then i 
+started to fight init where i removed all unnecessary params except regeta dt and gamma, and then
+fmm and first calculations: i remade pade into poly so it works better  (qp coeffs) + understood 
+that cayley is actually useless if i have fmm (they work for the same purpose but lie is worse).
+then i implemented leapfrog from the start + i removed half or things like wirtinger gates etc 
+(turns out they are like implicit so no need) + dont forget all these is in complex nums. then i
+have thought why not just remove everything and add to my meshgrid (space where layers, experts
+are alredy without for loop)? and so now we just slice them in the beginning and in the end 
+execute parallelly. i tried several versions where this time real imag into param that time we 
+divide into several matrixes but the thing is it doesnt really save us? like the problem isnt 
+here... i then added sobolev, helicity to my maslov and some other things too and i tried to link
+experts to maslov, layers to helicity etc but they explode in nums then idk. and so at the end i 
+left in fw was fmm and einsums in it. so i kinda understand how it works all but just dont know
+of innovative way to remove all this jumping around iwth linspaces stack or cat...
+
+my list of ideas: 
+INPUT:
+	FFT (NO HILBERT)
+	SPARSE FMM (NO STFTLOG NO SPECTROGRAM NO CWT NO DYADIC NO CONV FIRST NO MAMBA SELECTION) WITH RENORMALIZATION GROUP
+	NYSTROM (NO FMM NO MELLIN)
+	STATE CACHE (NO KV + SPINOR BLOCKS TOO)
+LOSS:
+	SYMPLECTIC EULER (NO DIFFPHYS NO PINN)
+ARCHITECTURE:
+	SYMPLET
+	LEAPFROG (HARD J PROJECTION)
+	UNCERTAINTY WEIGHT LOSS (MAPPED TO DUAL ACTOR DIFF)
+	ADAPTIVE LR AND WD (ON DAMPTH + SHANNON ETROPY)
+	THERMOSTAT (NO TEMPORALABN)
+	PRECONDITIONER LIKE JACOBI
+	GRADIENT BASED LOSS
+	BERRY (NO PHASE GRAD) 
+	WIRTINGER (NO ORTHOGONAL)
+	INTERFERENCE WAVES
+EXPENSIVE ARCH:
+	LIQUID MOE WITH SPARSE
+	PATH (NO VARIATIONAL INF)
+	MOBIUS WITH TAYLOR APPR (LOG)
+	SYMPLECTIC (NO OPERATORSPLIT  NO HAMILTONIAN NO PHASESNAP) WITH SEMI IMPLICIT INTEGRATION
+	ORTHOGONAL (NO HOLOMORPHIC) WITH CAYLEY
+	BERRY PHASE AS UNITARY COMPLEX ROTATION
+	WIRTINGER GATES (NO SPECTRAL GATE NO HOUSEHOLDER RELF NO ZGATE) WITH PHASE ACTIVATION WITH P / 2 SHIFT + MASLOV INDX
+	INTERFERENCE BASED LOGIC EIO
+	PROJECTOR GRADIENT
+	IMPORTANCE SAMPLING (GSIA)
+	GSIA (FOR LEAPROG / SYMPLET TO ENTRHOPIC DSCNT / THERMOSTAT)
+	LOG CHIRALITY AND WEYL'S LAW (IN FFT)
+	LFX (GHOST BUFFR AS MOVING AVERAGE OF + RESIDUL RIEMANN CURAVTURE FRM LAYER + DIFF OF CURRENT AND GHOST BUFF MEAN AS RICCI FLOW REGULARIZER)
+OPTIMIZATION:
+	ADJOINT AS BPTT (CAYLEY + SYMPLECTIC CROSS TERM) AS ONE BW PASS 
+	DELTANET (NO SOFTMAX)
+	SOBOLEV DECAY (ON W Z)
+	HMC (NO BROWNIAN)
+	SPECTRAL NORM WITH CAYLEY (NO BCNORM NO TIME AWARE NORM NO SOBOLEV NO JACOBIAN) AS POWER ITERATION
+	QAT + STE
+	UQ + NLL
+	MOMENTUM ONLY + P
+	PARAL SCAN AS RECURRENT MODE + LOG RELATION (PARALLEL TRANPORT LEVI CIVITA)
+	ZOH
+	RETNET
+	TTT AS DIAGONAL PRECONDITIONED (BEFORE WIRTINGER GATES + FROZEN W AND DYNAMIC DIAGNL PRECONDITIONER D) 
+	ACTIVATION SELECTION
+	EMA (NO SWA)
+	ADDITIONALLY MAP BERRY TO COMPLEX VALUED ROTATION
+	MIMO AS SPARSE SUB CHANNELS (TIED TO IRREPS OF LIE GROUPS + TIED TO WEYL + BOTT PERIODICITY)
+	USING SPINOR 2 X 2 COMPLEX MATRIX SL 2 C SO ONE OPERATION TO BOTT PER TO BLOCK DIAGONAL + CAUSAL LOOP CLOSURE
+	RICCI FLOW REGULARIZATION
+	HOLOMORPHIC BRIDGE
+OPTIMIZER:
+	HARDWARE:
+	MARS
+	ADEMAMIX
+	PERIODIC
+	UP SCALING
+	LAYERWISE ADAPTIVE
+	AGNB
+	ENTHROPIC DESCENT (BERR PHASE)
+	DYNAMIC DAMPING (PROPORTINL TO SHANNON ENTROPY)
+	THERMAL VISCSITY (HUMAN VCTR)
+HARDWARE:
+	SOFTSOLID1616 (FUSD LOGSUMEXP)
+	LORP
+	LOG SPACE
+	RECURSIVE SUMS
+	GHOST BUFFER
+	TENSOR CORES
+	SCOUT HEAD (NXT LOCAL RIEMAN)
+TRICKS:
+	INCREASED BATCH SIZE
+	ZGATE + DELTANET + LEAPFROG 
+	FAST STRUCTURED TRANSFORMS
+	CHECKPOINTING FOR ADJOINT (AT LOCAL MINIMUMS FOR STABLE BW)
+	QUANTIZING ONLY MOMENTUM
+	HESSIAN AWARE QUANTIZATION
+	SYMPLECTIC OR TIME STEP SCALING
+	MIMO + WEYL + BOTT UNITARY 8BIT (NO SL2C) COEF (NOTMATRXS)
+	MASLOV AS MAP AND COUNTER AND PERIODIC LR MULTIPLIER
+	SYMPLECTIC CROSS TERM BETWEEN POSITION AND MOMENTUM + CAYLEY IF WRONG
+REQUIREMENTS:
+	ONLY MOMENTUM
+	POSITION AFTERWARDS
+	STATE CACHE (LEVI CIVITA CNNCTN)
+	ACCUMULATED BERRY PHASE (+ AS ROTATION AND POSITION BIAS)
+	RIEMANNIAN METRIC OR HESSIAN
+	LIE ALGEBRA APPRX
+	PRECONDITION EVRYTHNG
+	PATH REGULARIZATION
+	BERRY PHASE MAP (MASLOVINDX)
+	CAYLEY KLEIN IN MOBIUS BERRY ETC
+	J AS SYMPLECTIC JUSTCE CONSTANT
+	OBSERVTINAL AWRENESS OF SCALE
+	MASLOV IS TARGET FREQ WHILE BERRY IS OSCILLATOR
+	DURING BW NO GRAD ON CAYLEY TO NOT BREAK PHYSICS
+	4 REAL NUMS ON QUATERNION OF SPINOR THEN 2 X 2 SO 8
+LOGIC:
+	W IS PHASE VELOCITY
+	Z AS PAIR WITH PHASE BERRY 3
+	Z MAPPED ON COMPLEX
+	MOBIUS TAYLOR BEND Z AS CONFORMAL MAP
+	Z IS RENORMALIZED GROUP
+	Z SHARE COMPLEX DIFF MOBIUS
+	ERROR = MISALIGNMENT (AS TOPOLICAL GATE BETWEEN BERRY AND MASLOV)
+	MODULE 2P TO PHASE TORUS
+	CIRCULAR PADDING NO ENDS
+	RIEMANNIAN PRPTNL CURVATURE
+	ROOTSOFUNITY DOMAINS WARPED
+	HIGH FREQ ONLY MATH NO EMOS
+	EVERYWHERE HOLOMORPHIC VIA WIRTINGER CALCULUS
+	ADJOINT SENSITIVITY
+	LIE GROUPING
+	BERRY ROTATION X STATE TRANS
+	NOETHER PNPLTY MOMENTM DRIFT
+	DUAL ACTOR + O.5 OFFSET THEN MEAN ONE MEAN PASS ADJOINT (1 IS OWN WRITHE 2 IS MUTUAL HELICITY)
+	J IN HAMLT AS CHECK + WRTNGER CALCULUS AS HOLOMORPH CHECK + OPTIMIZER DYNAMIC DAMPTHER + J LINKED MASLOV INDX + J AS FIXED POINT IN RENORM GROUP + J IN OFFSET IS CRVATURE RECOVERY
+	NOETHER VISIBILITY ON CRSS TERM
+	ATIYAH SINGER INDEX (ON MIMO)
+	PRINCIPAL BUNDLE HUMAN VCTOR
+	LIE DFRMTN HUMAN MAIN GROUP
+	HUMAN BIGGST DENSITY IN WEYLS
+	EXTERIOR DERIV ANALYSIS (CLOSED OR EXACT)
+	HOPF LINK TARGET VIA JONES POLY (+ CROSS CHANNL CORRELATION PNTLY + TOPOLOGICAL DECAY)
+REPLACEAGMENTS:
+	JONESPOLY - WRITHE & CROSSING HELICITY (CROSSN NUM PENLTY ON LOCAL WHILE HIERACHICAL GAUSS LINKING INTGRL ON GLOBAL)
+	REALIMAGINARY - CVNNS
+	FULLEULER - MOMNTUM PROJECTN
+	HOPFLINK ON BOTTLENECK LAYERS
+	ATIYAHINDEX - EULER CHAR OF SPARSITY MASK (ORTHOGONAL / RANK)
+	WEYL - SPECTRAL NORM
+	PRINCINAP BUNDLES - PARITIONED PHASE SHIFT LATENTS (NO PHASE EMBS)
+	SPECTRLNORM - SHAPING RFTT 
+	WIRTINGER CALC - AUGMENTED REAL JACOBIAN + ANTI HOLOMOPHIC COMPONENT OF WIRTINGER GRAD AS DAMPING FOR SHANNOW ENTROPY DAMP (NO REAL EQUIVALENT NETWORKS)
+	RENORMGROUP - ITERATIVE W TYIN
+	RICCI REGLR - SPECTRL LOGDET PNLTY
+	MOBIUS TAYLOR LOG - PADE APRRX
+	GSIA - STOCHSTIC POLYAK STEPSIZE
+	LEVICIVITA PARAL TRNSP - GLU WITH ROTATION
+	MIMO REPS (LIE GROUPS) - BLOCK DIAGONAL WEIGHT TYPING + CIRCULANT MATRICES
+	EXTERIOR DER ANALYSIS - LOCAL CONSERVATION DIVERGENCE
+
+which led to:
+1. DELTANET (FFT SUPERPOS + WEYL LAW EVEN (HUMAN DENSITY)) + IB + MASLOV (ROPE) + SPARSE FMM ZOOM INOUT HIERARCHY + NYSTROM SUBSET COMPRESSOR + MOBIUS TAYLOR NEW MAP + STATE CACHE EVOLUTION (LEVI CIVITA + * BERRY) + GHOST BUFER MOVING AVERAGE MEMORY OF GEMOTRY MODEL
+2. ADJOINT BPTT (SYMPLECTIC GEOMETRY HAMILTON CROSS TERM + J (FAIRNESS AND HAMILTONIAN CHECK + HOLOMOPH CHECK IN WIRTINGER + OPTIMIZER DYNAMIC DEMPTHER + LINKED MASLOV INDX = AS FIXED POINT IN RENORM GROUP + OFFSET IN CURVATURE RECOVERY) + LEAPFROG REVERSE HARDJ + ORTOGON CAYLEY AGAIN GEOM (NO BW USE STE RETRACTION IF NOT PRECONDITIONED) + ROOTS OF UNITY DOMAINS WARPED + BERRY HISTORY OF GEOMETRY ROTATION (ACCUMULATED BIAS + Z AS PAIR RENORM GROUP AND SHARE COMPLEX DIFF MOBIUS ERROR TO MASLOV ERROR = MISALIGNMENT) + LORP + LOGSPACE) INFINITE OPTIMIZATION STEP
+3. THREMOSTAT SCALES ENERGY + SEMI IMPLICIT CONSERVE ENERGY 
+4. UNCERTAINTY WL DUAL ACTOR DIFF ERROR 1 IS OWN WRITHE 2 IS MUTUAL HELICITY + PATH REGULARIZATION (PENALTY GEODESIC DISTANCE + USUAL L)
+5. WIRGINER NATIVE COMPLEX GATE + HOLOMOPHIC BRIDGE TO REALITY + TTT AS DIAGONAL PRECOND + P/2 SHIFT MASLOV IDX ACTIVATION LOOPING NO RELU SO COUNTER AND MAP AND FREQ + INTERFERECE BASED NO IF ELSE + ZGATE SWITCH
+6. JACOBI PRECOND HELPS HESSIAN + PROJECTOR GRAD GUARDS GRAD + RICCI FLOW REG RIEMANN PROPORTIONAL CURV BENDS OPTIMIZER SPACE + HMC MORE PRECISE GRAD + SCOUT HEAD + NXT LOCAL RIEMAN AGAIN GEOMETRY + MOMENTUM FIRST THEN POS + OBSERVATIONAL SCALE AWARENES + PRECONDITION EVERYTHING BEFR THROUGH * INVERSE HESS + W AS PHASE VELOCITY + NOETHER PENALTY + EXTERIOR DERIVATIVE ANALYSIS (CLOSED VS EXACT)
+7. PARALLEL SCAN + LEVI CIVITA = RECURSIVE SUMS
+8. LIQUID MOE SPARSE PATH
+9. SPECTRAL NORM GLOBAL NORM + INTERFERF WAVES NO NORM
+10. MIMO SPARSE SUB + ATYASH SINGER IDX + SPINOR 2X2 + BOTT PERIODICITY EVERY 8 DIM + CAUSAL LOOP CLOSURE + SOFTSOLID1616 + TENSOR CORES + 8BIT + COEF NOT MATRX + LIE ALGREBRA APROX + LIE GROUP (GLOBAL ETHICS INVARIANTS)
+11. SOBOLED DECAY + SHANNON ENTROPY LR WD + PERIODIC MASLOV LR + JONES POLYNOMIAL + HOPF LINK
+12. GSIA NEW WAY OF SAMPLING 
+13. MODULE 2P TO PHASE TORUS + CIRCULAR PADDING 
+14. HIGH FREQ ONLY NO EMOS
+
+which led to:
+1. DELTANET (FFT SUPERPOS +  SHAPING RFTT + AUGMENTED REAL JACOBIAN & ANTI HOLOMORPHIC COMPONENT OF WIRTINGER GRAD AS DAMPING FOR SHANNOW ENTORPY DAMP GLOBAL NORM + PRINCIPAL BUNDLES + PARTITIONED PHASE SHIFT LATENTS (NO PHASE EMBS) EVEN (HUMAN DENSITY)) + IB + MASLOV (ROPE) + SPARSE FMM ZOOM INOUT HIERARCHY + NYSTROM SUBSET COMPRESSOR + PADE APPROXIMATION NEW MAP + STATE CACHE EVOLUTION (GLU + * BERRY) + GHOST BUFER MOVING AVERAGE MEMORY OF GEMOTRY MODEL
+2. ADJOINT BPTT (SYMPLECTIC GEOMETRY HAMILTON CROSS TERM + J (FAIRNESS AND HAMILTONIAN CHECK + HOLOMOPH CHECK IN WIRTINGER + OPTIMIZER DYNAMIC DEMPTHER + LINKED MASLOV INDX = AS FIXED POINT IN ITERATIVE WEGIHT TYING + OFFSET IN CURVATURE RECOVERY) + LEAPFROG REVERSE HARDJ + ORTOGON CAYLEY AGAIN GEOM (NO BW USE STE RETRACTION IF NOT PRECONDITIONED) + ROOTS OF UNITY DOMAINS WARPED + BERRY HISTORY OF GEOMETRY ROTATION (ACCUMULATED BIAS + Z AS PAIR ITERATIVE WEIGHT TYING AND SHARE COMPLEX DIFF MOBIUS ERROR TO MASLOV ERROR = MISALIGNMENT) + LORP + LOGSPACE) INFINITE OPTIMIZATION STEP + MOMNTUM PROJECTN 
+3. THREMOSTAT SCALES ENERGY + SEMI IMPLICIT CONSERVE ENERGY 
+4. UNCERTAINTY WL DUAL ACTOR DIFF ERROR 1 IS OWN WRITHE 2 IS MUTUAL HELICITY + PATH REGULARIZATION (PENALTY GEODESIC DISTANCE + USUAL L)
+5. WIRGINER NATIVE COMPLEX GATE + HOLOMOPHIC BRIDGE TO REALITY + TTT AS DIAGONAL PRECOND + P/2 SHIFT MASLOV IDX ACTIVATION LOOPING NO RELU SO COUNTER AND MAP AND FREQ + INTERFERECE BASED NO IF ELSE + ZGATE SWITCH
+6. JACOBI PRECOND HELPS HESSIAN + PROJECTOR GRAD GUARDS GRAD +SPECTRAL LODGET PENALTY RIEMANN PROPORTIONAL CURV BENDS OPTIMIZER SPACE +LANGEVIN DYNAMICS WITH JCHECK MORE PRECISE GRAD + SCOUT HEAD + NXT LOCAL RIEMAN AGAIN GEOMETRY + MOMENTUM FIRST THEN POS + OBSERVATIONAL SCALE AWARENES + PRECONDITION EVERYTHING BEFR THROUGH * INVERSE HESS + W AS PHASE VELOCITY + NOETHER PENALTY + LOCAL CONSERVATION DIVERGENCE (CLOSED VS EXACT) + CVNNS + MOMENTUM PROJECTION
+7. PARALLEL SCAN + GLU = RECURSIVE SUMS
+8. LIQUID MOE SPARSE PATH
+9. SHAPING RFTT + AUGMENTED REAL JACOBIAN & ANTI HOLOMORPHIC COMPONENT OF WIRTINGER GRAD AS DAMPING FOR SHANNOW ENTORPY DAMP GLOBAL NORM + INTERFERF WAVES NO NORM
+10. MIMO SPARSE SUB + EULER CHAR OF SPARSITY MASK ORTHOGONAL + SPINOR 2X2 + BOTT PERIODICITY EVERY 8 DIM + CAUSAL LOOP CLOSURE + FIXEDPOINT ARTHMETIC UNITARY BLOCKS + TENSOR CORES + 8BIT + COEF NOT MATRX + LIE ALGREBRA APROX + LIE GROUP (GLOBAL ETHICS INVARIANTS AND AMPLITUDE) + DIAGONAL WIEGHT TYING + CIRCULANT
+11. SOBOLED DECAY + SHANNON ENTROPY LR WD + PERIODIC MASLOV LR + WRITHE & CROSSING HELICITY (CROSSING NUM PENALTY ON LOCAL WHILE HIERARICAL GAUSS LINKING ITEGRAL ON GLOBAL) + BOTTLENECK LAYERS 
+12. STORCHASTIC PLOYAK STEPSIZE NEW WAY OF SAMPLING 
+13. MODULE 2P TO PHASE TORUS + CIRCULAR PADDING 
+14. HIGH FREQ ONLY NO EMOS
+15. COUPLING K FOR MACRO AND MICRO
+
+which led to:
+1. spinor 2x2 + bott + lie group + tensor core + fixed point unitary block + lie algebra + circulant + diagonal weight tying as block
+2. mimo + euler as matmul
+3. maslov as rope
+4. berry phase accum zpair + 2p phase torus + circular padding as lru
+5. wirtinger gates as swiglu
+6. symplectic cross term + deltanet + shaping rfft + high freq only + bottleneck layer as ssm
+7. liquid moe sparse paths as moe
+8. sparse fmm + nystrom as mla
+9. ttt + jacobi preconditioner + inverse hessian+ spectral logdet penalty + noether penalty + curvature recovery + projector grad guards + scout head + next local riemann + langevin dynamics + adjoint bptt + hamiltonian cross term + augmented real jacobian + anti holomorph as optimizer
+10. principal bundles + phase latents + glu + parallel scan + recursive sum + berry + ib as hidden state space
+11. pade approximation + maslov + zgate as relu
+12. ghost buffer + leapfrog hardj + momentum projection + m then p as momentum 
+13. cayley + roots of unity + iterative weight tying + diagonal basis as weight init + w as phase velocity 
+14. j as check
+15. mobius + maslov + dual as error
+16. thermostat + wirtinger grad damping of shannon entropy + interference waves as rms
+17. semi implicit as euler
+18. path regularization + sobolev decay + writhe crossing helicity +  shannon entropy + periodic maslov +  stochastic polyak as regularization + scaling
+19. holomorphic bridge as outrpoj
+20. cvnn +  lorp + lospace as complex nums
+
+which led to:
+2. spinor 2x2 + + lie group + tensor core + fixed point unitary block + lie algebra + circulant + diagonal weight tying as block
+3. mimo + euler as matmul
+4. maslov as rope
+5. berry phase accum zpair + 2p phase torus + circular padding as lru
+6. wirtinger gates as swiglu
+7. symplectic cross term + deltanet + shaping rfft + high freq only + bottleneck layer as ssm
+8. liquid moe sparse paths as moe
+9. sparse fmm + nystrom as mla
+10. phase latents + glu + parallel scan + recursive sum + berry + ib as hidden state space
+11. pade approximation + maslov as relu
+12. cayley + roots of unity + iterative weight tying + diagonal basis as weight init + w as phase velocity 
+13. thermostat + wirtinger grad damping of shannon entropy + interference waves as rms
+14. semi implicit as euler
+15. ghost buffer + leapfrog hardj + momentum projection + m then p as momentum 
+16. holomorphic bridge as outrpoj
+17. cvnn +  lorp + lospace as complex nums
+
+18. ttt + jacobi preconditioner + inverse hessian+ spectral logdet penalty + noether penalty + curvature recovery + projector grad guards + scout head + next local riemann + langevin dynamics + adjoint bptt + hamiltonian cross term + augmented real jacobian + anti holomorph + shannon entropy +  stochastic polyak  as optimizer
+19. j as check
+20. mobius + maslov + dual as error
+21. path regularization as write and helicity + sobolev decay + writhe crossing helicity + periodic maslov + as regularization + scaling
+22. 8bit 32x32 + every 20 steps + j + lut like mamba
+
+now code:
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+class full(nn.Module):
+    def __init__(self, rank=4, alpha=8, block=32, levels=225, wgain=0.02, 
+                 again=0.1, experts=8, emb=384, dims=12, layers=24, bott=4):
+        super().__init__()
+        full = levels * layers * experts
+        self.block = block
+        self.numb = full // block
+
+        coords = torch.stack(torch.meshgrid(
+            torch.linspace(0, 1, levels),
+            torch.linspace(0, 1, layers),
+            torch.linspace(0, 1, experts),
+            indexing='ij'
+        ), dim=-1).view(-1, 3) 
+        idx = torch.arange(0, self.block // 2).float()
+        bases = torch.logspace(4, 6, dims, base=10.0)
+        idx = torch.arange(0, self.block // 2).float() 
+        maslovshift = torch.sin(coords.sum(dim=-1, 
+                                           keepdim=True) * torch.pi) * 0.25
+        frequencies = 1.0 / (bases.unsqueeze(1) ** (idx / self.block // 2))
+        angles = frequencies.unsqueeze(0) + maslovshift
+        spinors = torch.stack([torch.cos(angles), 
+                        torch.sin(angles)], dim=-1)
+        self.func = nn.Parameter(spinors * wgain)
+
+        self.emb = emb
+        self.bottdim = emb // 4
+        self.down = nn.Linear(emb, self.bottdim)
+        self.up = nn.Linear(self.bottdim, emb)
+
+        self.algebra = nn.Parameter(torch.zeros(emb // 2, emb // 2))
+        with torch.no_grad():
+            diagvals = torch.linspace(-0.1, 0.1, self.emb // 2)
+            self.algebra.fill_(0)
+            for i in range(self.emb // 2):
+                self.algebra[i, i] = diagvals[i] 
+        self.euler = nn.Parameter(torch.full((emb // 2,), 0.1))
+        self.eta = nn.Parameter(torch.tensor(0.01))
+
+        self.w = nn.Parameter(torch.randn(emb//2, dtype=torch.complex64))
+        self.v = nn.Parameter(torch.randn(emb//2, dtype=torch.complex64))
+
+        self.padep = nn.Parameter(torch.zeros(2))
+        self.padeq = nn.Parameter(torch.zeros(2))
+        with torch.no_grad():
+            self.padeq.fill_(0.01) 
+
+        self.gaugefield = nn.Parameter(torch.randn(emb//2) * 0.01)     
+        self.glu = nn.Parameter(torch.randn(emb//2, emb//2) * 0.02)
+
+        self.gamma = nn.Parameter(torch.full((emb//2,), 0.05))
+        self.temperature = nn.Parameter(torch.tensor(0.01)) 
+        self.dt = 0.1
+
+        self.alphaentropy = nn.Parameter(torch.tensor(0.02))
+        self.wavephase = nn.Parameter(torch.randn(emb//2))
+
+        self.weight_real = nn.Parameter(torch.randn(emb//2, self.emb) * 0.02)
+        self.weight_imag = nn.Parameter(torch.randn(emb//2, self.emb) * 0.02)
+
+        self.dt = 0.1
+        self.momentum_gain = nn.Parameter(torch.ones(emb//2) * 0.99)
+
+        with torch.no_grad():
+            realbase = torch.logspace(1, 3, emb//2, base=10.0)
+            imagbase = torch.logspace(2, 4, emb//2, base=10.0)
+            self.complexlospace = nn.Parameter(torch.complex(realbase, imagbase))
+
+    def forward(self, x):
+        B, T, C = x.shape
+        xbott = self.down(x)
+        xsplit = xbott.view(B, T, self.emb // 2, 2)
+
+        symplectic = self.eta * (xsplit[..., 0] * xsplit[..., 1])
+        xcomplex = torch.complex(xsplit[..., 0], xsplit[..., 1] + symplectic)
+
+        padlen = T // 4
+        m = max(1, T // 4)
+        landmarks = xcomplex[:, ::4, :] 
+        nystrom = torch.matmul(xcomplex, landmarks.conj().transpose(
+            -1, -2)) / m
+        xcomplex = torch.matmul(nystrom, landmarks)
+        xcomplexpadded = F.pad(torch.view_as_real(xcomplex).permute(
+            0, 3, 1, 2), (0, 0, padlen, padlen), mode='circular')
+        xcomplexpadded = torch.complex(xcomplexpadded[:, 0]
+                                       , xcomplexpadded[:, 1])
+        
+        fmm = torch.fft.rfft(xcomplexpadded , n=T + 2 * padlen, dim=1)
+        freq = torch.linspace(0, 1, fmm.size(1))
+        pade = (1.0 + torch.polyval(self.padep, freq)) / (
+            1.0 + torch.polyval(self.padeq, freq) + 1e-6)
+        filteredfmm = fmm * pade.unsqueeze(0).unsqueeze(-1)
+        outfmm = torch.fft.irfft(filteredfmm , n=T + 2 * padlen, dim=1)
+        outfmm = outfmm[:, padlen:-padlen, :]
+
+        cayleyi = torch.eye(self.emb // 2)
+        lie = self.algebra - self.algebra.t() 
+        cayley = torch.matmul(cayleyi - lie, torch.inverse(cayleyi + lie))
+        duplicate = cayley.unsqueeze(0).unsqueeze(0).repeat(B, T, 1, 1)
+        paralscan = torch.linalg.cumprod(duplicate, dim=1)
+        mimo = torch.matmul(outfmm.unsqueeze(-2), paralscan).squeeze(-2)
+        
+        q = torch.real(mimo)
+        p = torch.imag(mimo)
+        noise = torch.randn_like(p) * torch.sqrt(2 * self.gamma 
+                                                 * self.temperature * self.dt)
+        q_next = q + self.dt * p 
+        p_next = p + self.dt * (-q_next) - (self.gamma * p) + noise
+        mimo = torch.complex(q_next, p_next)
+
+        mimomagsq = torch.real(mimo * mimo.conj()) + 1e-8
+        prob = mimomagsq / (mimomagsq.sum(dim=-1, keepdim=True) + 1e-8)
+        wirtingerentrgrad = mimo * (torch.log(prob) + 1.0)
+        mimo = mimo - self.alphaentropy * wirtingerentrgrad
+
+        refwave = torch.exp(1j * self.wavephase).unsqueeze(0).unsqueeze(0)
+        interferencerms = torch.sqrt(
+            0.5 * (mimomagsq + 1.0 + 2.0 * torch.real(mimo * refwave.conj())) + 1e-6
+        )
+        mimo = mimo * interferencerms
+
+        euler = torch.exp(1j * self.euler)
+        roots = torch.exp(2j * torch.pi * torch.arange(
+            self.emb // 2) / self.emb)
+        winding = torch.cumsum(torch.diag(self.algebra), dim=0)
+        maslovindex = torch.floor(winding / (2 * torch.pi))
+        berry = torch.complex(torch.cos(winding), torch.sin(winding))
+
+        gate = torch.sigmoid(torch.real(
+            self.w * outfmm + self.v * outfmm.conj())
+            + (maslovindex * 0.1))
+        glu = torch.sigmoid(torch.real(mimo * mimo.conj()).matmul(self.glu))
+        connection = torch.cumsum(self.gaugefield, dim=0)
+        phaselatents = torch.exp(1j * connection).unsqueeze(0).unsqueeze(0)
+
+        xc = mimo * gate * euler * berry * roots * phaselatents * glu
+        rotcomplex = torch.view_as_complex(self.func)
+        xrotated = xc * rotcomplex.unsqueeze(0).unsqueeze(0)
+
+        qfinal = xrotated.real
+        pfinal = xrotated.imag
+        ghost_q = qfinal + 0.5 * self.dt * pfinal
+        acceleration = -ghost_q * self.complexlospace.real.unsqueeze(0).unsqueeze(0)
+        pnextfinal = pfinal + self.dt * acceleration
+        pnextfinal = pnextfinal * self.momentum_gain.unsqueeze(0).unsqueeze(0) # Momentum projection
+        qnextfinal = ghost_q + 0.5 * self.dt * pnextfinal
+        zintegrated = torch.complex(qnextfinal, pnextfinal)
+
+        zreal = zintegrated.real
+        zimag = zintegrated.imag
+        outreal = torch.matmul(zreal, self.weight_real) - torch.matmul(zimag, self.weight_imag)
+        outimag = torch.matmul(zreal, self.weight_imag) + torch.matmul(zimag, self.weight_real)
+        holomorph = torch.cat([outreal, outimag], dim=-1)
+
+        xout = torch.view_as_real(holomorph).flatten(2)
+        xbott = self.up(xout)
+
+------>:
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+class full(nn.Module):
+    def __init__(self, rank=4, alpha=8, block=32, levels=225, wgain=0.02, 
+                 again=0.1, experts=8, emb=384, dims=12, layers=24, bott=4):
+        super().__init__()
+        full = levels * layers * experts
+        self.block = block
+        self.numb = full // block
+
+        coords = torch.stack(torch.meshgrid(
+            torch.linspace(0, 1, levels),
+            torch.linspace(0, 1, layers),
+            torch.linspace(0, 1, experts),
+            indexing='ij'
+        ), dim=-1).view(-1, 3) 
+        idx = torch.arange(0, self.block // 2).float()
+        bases = torch.logspace(4, 6, dims, base=10.0)
+        idx = torch.arange(0, self.block // 2).float() 
+        maslovshift = torch.sin(coords.sum(dim=-1, 
+                                           keepdim=True) * torch.pi) * 0.25
+        frequencies = 1.0 / (bases.unsqueeze(1) ** (idx / self.block // 2))
+        angles = frequencies.unsqueeze(0) + maslovshift
+        spinors = torch.stack([torch.cos(angles), 
+                        torch.sin(angles)], dim=-1)
+        self.func = nn.Parameter(spinors * wgain)
+
+        self.emb = emb
+        self.bottdim = emb // 4
+        self.down = nn.Linear(emb, self.bottdim)
+        self.up = nn.Linear(self.bottdim, emb)
+
+        self.algebra = nn.Parameter(torch.zeros(emb // 2, emb // 2))
+        with torch.no_grad():
+            diagvals = torch.linspace(-0.1, 0.1, self.emb // 2)
+            self.algebra.fill_(0)
+            for i in range(self.emb // 2):
+                self.algebra[i, i] = diagvals[i] 
+
+        self.w = nn.Parameter(torch.randn(emb//2, dtype=torch.complex64))
+        self.v = nn.Parameter(torch.randn(emb//2, dtype=torch.complex64))
+            
+        self.gamma = nn.Parameter(torch.full((emb//2,), 0.05))
+        self.dt = 0.1
+        self.regeta = nn.Parameter(torch.tensor(0.01))
+
+        with torch.no_grad():
+            realbase = torch.logspace(1, 3, emb//2, base=10.0)
+            imagbase = torch.logspace(2, 4, emb//2, base=10.0)
+            self.complexlospace = nn.Parameter(torch.complex(realbase, imagbase))
+
+    def forward(self, x):
+        B, T, C = x.shape
+        xbott = self.down(x)
+        xsplit = xbott.view(B, T, self.emb // 2, 2)
+        q, p = xsplit[..., 0], xsplit[..., 1]
+        symplectic = self.regeta * (q * p)
+        xcomplex = torch.complex(q, p + symplectic)
+
+        padlen = max(1, T // 4)
+        landmarks = xcomplex[:, ::4, :]
+        nystrom = torch.matmul(xcomplex, landmarks.conj().transpose(
+            -1, -2)) / padlen
+        xcomplex = torch.matmul(nystrom, landmarks)        
+        xcomplexpadded = F.pad(xcomplex.transpose(1, -1), (
+            padlen, padlen), mode='circular').transpose(1, -1)
+        
+        fmm = torch.fft.rfft(xcomplexpadded , n=T + 2 * padlen, dim=1)
+        qcoeff = torch.mean(q, dim=[0, 1])[:4] * self.w[:4]
+        pcoeff = torch.mean(p, dim=[0, 1])[:4] * self.v[:4]
+        freq = torch.linspace(0, 1, fmm.size(1))
+        pade = (1.0 + torch.polyval(pcoeff, freq)) / (
+            1.0 + torch.polyval(qcoeff, freq) + 1e-6)
+        filteredfmm = fmm * pade.unsqueeze(0).unsqueeze(-1)
+        outfmm = torch.fft.irfft(
+            filteredfmm , n=T + 2 * padlen, dim=1)[:, padlen:-padlen, :]
+
+        cayleyi = torch.eye(self.emb // 2)
+        lie = self.algebra - self.algebra.mhr()
+        cayley = torch.matmul(cayleyi - lie, torch.inverse(cayleyi + lie))
+        duplicate = cayley.unsqueeze(0).unsqueeze(0).repeat(B, T, 1, 1)
+        paralscan = torch.linalg.cumprod(duplicate, dim=1)
+        mimo = torch.matmul(outfmm.unsqueeze(-2), paralscan).squeeze(-2)
+        
+        decay = 1.0 - (self.gamma * self.dt)
+        Areal = 1.0 - self.dt**2 * decay
+        Aimag = (self.dt * (2.0 - self.gamma)) * decay
+        qmimo = mimo.real * Areal - mimo.imag * Aimag
+        pmimo = mimo.real * Aimag + mimo.imag * Areal
+        acceleration = -qmimo * self.complexlospace.real.unsqueeze(0).unsqueeze(0)
+        p = p + 0.5 * self.dt * acceleration
+        velocity = p * torch.rsqrt(p**2 + 1.0)
+        q = q + 0.5 * self.dt * velocity
+        p = p * decay
+        weighted_q = self.w * torch.real(qmimo * q + pmimo * p)
+        weighted_p = self.v * torch.imag(qmimo * q - pmimo * p)
+        mimomagsq = (weighted_q ** 2) + (weighted_p ** 2) + 1e-8
+        connection = torch.cumsum(mimomagsq, dim=1)
+        phaselatents = torch.exp(1j * connection).unsqueeze(0).unsqueeze(0)
+        crossinterference = (q * phaselatents.real) + (p * phaselatents.imag)        
+        interferencerms = torch.sqrt(0.5 * (mimomagsq + 1.0 + 2.0 * crossinterference) + 1e-6)
+        q = q * interferencerms
+        noise_scale = torch.sqrt(2 * self.gamma * self.dt)
+        p = p + torch.randn_like(p) * noise_scale
+        velocity = p * torch.rsqrt(p**2 + 1.0)
+        q = q + 0.5 * self.dt * velocity
+        acceleration_next = -q * self.complexlospace.real.unsqueeze(0).unsqueeze(0)
+        p = p + 0.5 * self.dt * acceleration_next
+        momentumgain = 1.0 - (self.gamma * 0.2)
+        p = p * momentumgain.unsqueeze(0).unsqueeze(0)
+        mimo = torch.complex(q, p)
+        maslovindex = torch.floor(connection / (2 * torch.pi))
+        gate = torch.sigmoid(mimomagsq + (maslovindex * 0.1))
+
+        prob = mimomagsq / (mimomagsq.sum(dim=-1, keepdim=True) + 1e-8)
+        wirtingerentrgrad = mimo * (torch.log(prob) + 1.0)
+        mimo = mimo - self.regeta * wirtingerentrgrad
+        #roots = torch.exp(2j * torch.pi * torch.arange(
+        #    self.emb // 2) / self.emb)
+        maslovindex = torch.floor(connection, dim=-1) / (2 * torch.pi)
+        berry = torch.complex(torch.cos(connection), torch.sin(connection))
+
+        xc = mimo * gate * phaselatents * berry 
+        xout = torch.view_as_real(xc).flatten(2)
+        xbott = self.up(xout)
+
+------>:
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+class full(nn.Module):
+    def __init__(self, rank=4, alpha=8, block=32, levels=225, wgain=0.02, 
+                 again=0.1, experts=8, emb=384, dims=12, layers=24, bott=4):
+        super().__init__()
+        full = levels * layers * experts
+        self.block = block
+        self.numb = full // block
+
+        coords = torch.stack(torch.meshgrid(
+            torch.linspace(0, 1, levels),
+            torch.linspace(0, 1, layers),
+            torch.linspace(0, 1, experts),
+            indexing='ij'
+        ), dim=-1).view(-1, 3) 
+        idx = torch.arange(0, self.block // 2).float()
+        bases = torch.logspace(4, 6, dims, base=10.0)
+        idx = torch.arange(0, self.block // 2).float() 
+        maslovshift = torch.sin(coords.sum(dim=-1, 
+                                           keepdim=True) * torch.pi) * 0.25
+        frequencies = 1.0 / (bases.unsqueeze(1) ** (idx / self.block // 2))
+        angles = frequencies.unsqueeze(0) + maslovshift
+        spinors = torch.stack([torch.cos(angles), 
+                        torch.sin(angles)], dim=-1)
+        self.func = nn.Parameter(spinors * wgain)
+        self.emb = emb
+
+        self.w = nn.Parameter(torch.randn(emb//2, dtype=torch.complex64))
+        self.v = nn.Parameter(torch.randn(emb//2, dtype=torch.complex64))
+        self.gamma = nn.Parameter(torch.full((emb//2,), 0.05))
+        self.dt = 0.1
+        self.regeta = nn.Parameter(torch.tensor(0.01))
+        
+    def forward(self, x):
+        B, T, C = x.shape
+        xsplit = x.view(B, T, self.emb // 2, 2)
+        q, p = xsplit[..., 0], xsplit[..., 1]
+        symplectic = self.regeta * (q * p)
+        xcomplex = torch.complex(q, p + symplectic)
+
+        padlen = max(1, T // 4)
+        landmarks = xcomplex[:, ::4, :]
+        nystrom = torch.matmul(xcomplex, landmarks.conj().transpose(
+            -1, -2)) / padlen
+        xcomplex = torch.matmul(nystrom, landmarks)        
+        xcomplexpadded = F.pad(xcomplex.transpose(1, -1), (
+            padlen, padlen), mode='circular').transpose(1, -1)
+        
+        fmm = torch.fft.rfft(xcomplexpadded , n=T + 2 * padlen, dim=1)
+        qcoeff = torch.mean(q, dim=[0, 1])[:4] * self.w[:4]
+        pcoeff = torch.mean(p, dim=[0, 1])[:4] * self.v[:4]
+        freq = torch.linspace(0, 1, fmm.size(1))
+        pade = (1.0 + torch.polyval(pcoeff, freq)) / (
+            1.0 + torch.polyval(qcoeff, freq) + 1e-6)
+        filteredfmm = fmm * pade.unsqueeze(0).unsqueeze(-1)
+        outfmm = torch.fft.irfft(filteredfmm , n=T + 2 * padlen, dim=1
+                                 )[:, padlen:-padlen, :]
+        
+        xcomplexpadded = F.pad(xcomplex.transpose(1, -1), (padlen, padlen), mode='circular').transpose(1, -1)
+        fmm = torch.fft.rfft(xcomplexpadded, n=T + 2 * padlen, dim=1)
+        q_fingerprint = q.mean(dim=1)  
+        p_fingerprint = p.mean(dim=1) 
+        chunks = self.emb // 2 // 4
+        qcoeff = q_fingerprint[:, :self.emb // 2:chunks] 
+        pcoeff = p_fingerprint[:, :self.emb // 2:chunks] 
+        freq_len = fmm.size(1)
+        freq = torch.linspace(0, 1, freq_len, device=x.device).unsqueeze(0) 
+        powers = torch.arange(4, device=x.device).view(4, 1)
+        freq_powers = freq ** powers
+        poly_p = 1.0 + torch.matmul(pcoeff, freq_powers) 
+        poly_q = 1.0 + torch.matmul(qcoeff, freq_powers)
+        pade = poly_p / (poly_q + 1e-6) 
+        filteredfmm = fmm * pade.unsqueeze(-1)
+        outfmm = torch.fft.irfft(filteredfmm, n=T + 2 * padlen, dim=1)[:, padlen:-padlen, :]
+
+        fmm = torch.fft.rfft(xcomplexpadded , n=T + 2 * padlen, dim=1)
+        chunks = self.emb // 2 // 4
+        qcoeff = (q * self.w)[:, :, ::chunks][..., :4] 
+        pcoeff = (p * self.v)[:, :, ::chunks][..., :4]
+        freq = torch.linspace(0, 1, fmm.size(1))
+        pade = (1.0 + torch.polyval(pcoeff, freq)) / (
+            1.0 + torch.polyval(qcoeff, freq) + 1e-6)
+        filteredfmm = fmm * pade.unsqueeze(0).unsqueeze(-1)
+        outfmm = torch.fft.irfft(filteredfmm , n=T + 2 * padlen, dim=1
+                                 )[:, padlen:-padlen, :]
+
+        #cayleyi = torch.eye(self.emb // 2)
+        #lie = self.algebra - self.algebra.mhr()
+        #cayley = torch.matmul(cayleyi - lie, torch.inverse(cayleyi + lie))
+        #duplicate = cayley.unsqueeze(0).unsqueeze(0).repeat(B, T, 1, 1)
+        #paralscan = torch.linalg.cumprod(duplicate, dim=1)
+        #mimo = torch.matmul(outfmm.unsqueeze(-2), paralscan).squeeze(-2)
+
+        rotcomplex = torch.view_as_complex(self.func) 
+        mixing_spinors = rotcomplex.view(-1, self.emb // 2)[0] 
+        mimo = outfmm * mixing_spinors.unsqueeze(0).unsqueeze(0)
+        
+        decay = 1.0 - (self.gamma * self.dt)
+        Areal = 1.0 - self.dt**2 * decay
+        Aimag = (self.dt * (2.0 - self.gamma)) * decay
+        qmimo = mimo.real * Areal - mimo.imag * Aimag
+        pmimo = mimo.real * Aimag + mimo.imag * Areal
+        p = p + 0.5 * self.dt * -qmimo
+        velocity = p * torch.rsqrt(p**2 + 1.0)
+        q = q + 0.5 * self.dt * velocity
+        p = p * decay
+        weighted_q = self.w * torch.real(qmimo * q + pmimo * p)
+        weighted_p = self.v * torch.imag(qmimo * q - pmimo * p)
+        mimomagsq = (weighted_q ** 2) + (weighted_p ** 2) + 1e-8
+        connection = torch.cumsum(mimomagsq, dim=1)
+        phaselatents = torch.exp(1j * connection).unsqueeze(0).unsqueeze(0)
+        crossinterference = (q * phaselatents.real) + (p * phaselatents.imag)        
+        interferencerms = torch.sqrt(0.5 * (mimomagsq + 1.0 + 2.0 * crossinterference) + 1e-6)
+        q = q * interferencerms
+        noise_scale = torch.sqrt(2 * self.gamma * self.dt)
+        p = p + torch.randn_like(p) * noise_scale
+        velocity = p * torch.rsqrt(p**2 + 1.0)
+        q = q + 0.5 * self.dt * velocity
+        p = p + 0.5 * self.dt * -q
+        momentumgain = 1.0 - (self.gamma * 0.2)
+        p = p * momentumgain.unsqueeze(0).unsqueeze(0)
+        mimo = torch.complex(q, p)
+        maslovindex = torch.floor(connection / (2 * torch.pi))
+        gate = torch.sigmoid(mimomagsq + (maslovindex * 0.1))
+
+        prob = mimomagsq / (mimomagsq.sum(dim=-1, keepdim=True) + 1e-8)
+        wirtingerentrgrad = mimo * (torch.log(prob) + 1.0)
+        mimo = mimo - self.regeta * wirtingerentrgrad
+        #roots = torch.exp(2j * torch.pi * torch.arange(
+        #    self.emb // 2) / self.emb)
+        maslovindex = torch.floor(connection, dim=-1) / (2 * torch.pi)
+        berry = torch.complex(torch.cos(connection), torch.sin(connection))
+
+        xc = mimo * gate * phaselatents * berry 
+        return torch.view_as_real(xc).flatten(2)
+
+------>:
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class TrueGeometricDynamics(nn.Module):
+    def __init__(self, emb=384, block=32, levels=12, layers=4, experts=8, wgain=0.02):
+        super().__init__()
+        self.block = block
+        self.emb = emb
+        
+        # 1. CORE PHYSICS SCALARS
+        self.reg_scale = nn.Parameter(torch.tensor(0.01))
+        self.friction = nn.Parameter(torch.tensor(0.05))
+        self.dt = 0.1
+
+        # 2. THE GEOMETRIC SPINOR OCEAN 
+        # Let's define the grid directly so it matches your architectural tokens
+        # Total grid capacity = levels * layers * experts
+        self.grid_dim = levels * layers * experts # e.g., 12 * 4 * 8 = 384!
+        
+        idx = torch.arange(0, self.block // 2).float()
+        bases = torch.logspace(4, 6, levels, base=10.0) 
+        frequencies = 1.0 / (bases.unsqueeze(1) ** (idx / (self.block // 2)))
+        
+        # Build your spinors directly matched to your hidden space dimension
+        # No more arbitrary reshaping or flattening later!
+        spinors = torch.stack([torch.cos(frequencies), torch.sin(frequencies)], dim=-1)
+        self.func = nn.Parameter(spinors * wgain) # Pure geometric anchor
+
+        # 3. CONTEXT-AWARE SPECTRUM MASK (Replacing the clunky 4-coeff Padé)
+        # Instead of '4 4 4 4', we learn a dynamic scalar weight for EVERY frequency
+        self.spectral_predictor = nn.Linear(emb, 1)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        
+        # Alternative Time Split: Even tokens are Position (q), Odd tokens are Momentum (p)
+        # This allows tokens to push each other across the sequence dimension!
+        q = x[:, 0::2, :] # Temporal Position
+        p = x[:, 1::2, :] # Temporal Momentum
+        
+        # Ensure symmetric shapes if T is odd
+        min_T = min(q.size(1), p.size(1))
+        q, p = q[:, :min_T, :], p[:, :min_T, :]
+        
+        # Generate Symplectic Phase Coupling across Time
+        symplectic = self.reg_scale * (q * torch.roll(p, shifts=1, dims=1))
+        xcomplex = torch.complex(q, p + symplectic)
+
+        # Global Token Mixing (Nyström Attention)
+        padlen = max(1, min_T // 4)
+        landmarks = xcomplex[:, ::4, :]
+        nystrom = torch.matmul(xcomplex, landmarks.conj().transpose(-1, -2)) / padlen
+        xcomplex = torch.matmul(nystrom, landmarks)         
+        
+        # Spectral Spatial Pad & FFT
+        xcomplexpadded = F.pad(xcomplex.transpose(1, -1), (padlen, padlen), mode='circular').transpose(1, -1)
+        fmm = torch.fft.rfft(xcomplexpadded, n=min_T + 2 * padlen, dim=1)
+        
+        # NON-КАНДОВЫЙ SPECTRAL MASK (Goodbye '4 4 4 4' Loops!)
+        # We project the full token state to generate an explicit frequency mask
+        # Every token frame gets a beautifully tailored spectral filter
+        dynamic_mask = torch.sigmoid(self.spectral_predictor(xcomplex).transpose(1, 2)) # (B, 1, T)
+        dynamic_mask_padded = F.interpolate(dynamic_mask, size=fmm.size(1), mode='linear', align_corners=False)
+        
+        filteredfmm = fmm * dynamic_mask_padded.transpose(1, 2)
+        outfmm = torch.fft.irfft(filteredfmm, n=min_T + 2 * padlen, dim=1)[:, padlen:-padlen, :]
+        
+        # Physical Leapfrog loop over the sequence wave
+        gamma = self.friction
+        decay = 1.0 - (gamma * self.dt)
+        qmimo, pmimo = outfmm.real, outfmm.imag
+        
+        p = p + 0.5 * self.dt * (-qmimo)
+        q = q + self.dt * (p * torch.rsqrt(p**2 + 1.0))
+        p = p * decay
+        
+        # Spinor Crossing: Let the wave pass through your raw spinor parameters directly
+        rotcomplex = torch.view_as_complex(self.func).mean(dim=-1).unsqueeze(0).unsqueeze(0) # Unified broadcast
+        mimo = torch.complex(q, p) * rotcomplex
+        
+        # Interleave Position and Momentum back into a unified sequence time-stream
+        output = torch.zeros(B, min_T * 2, C, device=x.device, dtype=x.dtype)
+        output[:, 0::2, :] = mimo.real
+        output[:, 1::2, :] = mimo.imag
+        
+        return output
+
+------>:
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class UnifiedParallelOperatorOcean(nn.Module):
+    def __init__(self, emb=384, block=32, levels=12, layers=4, experts=8, wgain=0.02):
+        super().__init__()
+        self.block = block
+        self.emb = emb
+        
+        # 1. Custom Space Allocations for specialized math
+        self.space_allocations = {
+            "op_shift":   1,    
+            "op_twist":   1,    
+            "op_damp":    1,    
+            "pade_num":   4,    # Sized exactly for 4-degree numerator
+            "pade_den":   4     # Sized exactly for 4-degree denominator
+        }
+        total_slots = sum(self.space_allocations.values()) # Exactly 11 specialized tracks
+        
+        # 2. 5D Grid Initialization
+        levels_co, layers_co, experts_co, phase_co = torch.meshgrid(
+            torch.linspace(0.01, 1.0, levels),
+            torch.linspace(0.0, 1.0, layers),
+            torch.linspace(0.0, 1.0, experts),
+            torch.linspace(-torch.pi, torch.pi, 2), # Phase tracks
+            indexing='ij'
+        )
+        
+        angles = phase_co.unsqueeze(-1).expand(-1, -1, -1, -1, total_slots).clone()
+        
+        idx = torch.arange(0, self.block // 2).float()
+        bases = torch.logspace(4, 6, levels, base=10.0)
+        frequencies = 1.0 / (bases.unsqueeze(1) ** (idx / (self.block // 2)))
+        angles = angles + frequencies.view(levels, 1, 1, 1, 1)
+        
+        self.ocean_manifold = nn.Parameter(torch.complex(torch.cos(angles) * wgain, torch.sin(angles) * wgain))
+
+    def forward(self, x):
+        B, T, C = x.shape
+        device = x.device
+        
+        # Clean parameter extraction: Collapse spatial grid, keep phase (2) and slots (11)
+        # Resulting shape before interpolate: (2, 11, 16)
+        structural_pool = self.ocean_manifold.mean(dim=[0, 1, 2])
+        
+        # Interpolate cleanly to embedding dimension C
+        structural_pool = F.interpolate(structural_pool.view(1, 2, 11, -1), size=C, mode='nearest').squeeze(0) # (2, 11, C)
+        
+        # 3. Native Uneven Custom Extraction
+        op_shift    = structural_pool[0, 0].view(1, 1, C)
+        op_twist    = structural_pool[0, 1].view(1, 1, C)
+        op_damp     = structural_pool[0, 2].view(1, 1, C)
+        op_pade_num = structural_pool[0, 3:7].transpose(0, 1)  # 4 slots
+        op_pade_den = structural_pool[0, 7:11].transpose(0, 1) # 4 slots
+
+        # 4. Global Wave Domain Preparation
+        xcomplex = torch.complex(x, torch.zeros_like(x))
+        
+        # Global context via Nystrom
+        landmarks = torch.matmul(xcomplex, op_shift.conj().transpose(-1, -2)).expand(-1, -1, T)
+        nystrom_map = torch.matmul(xcomplex, landmarks.conj().transpose(-1, -2)) / T
+        global_context = torch.matmul(nystrom_map, landmarks)
+
+        # FFT Spectrum Transformation
+        padded = F.pad(global_context.transpose(1, -1), (T, T), mode='circular').transpose(1, -1)
+        fmm = torch.fft.rfft(padded, n=T + 2 * T, dim=1)
+        
+        # 5. 4th-Degree Padé Polynomial Vector Evaluation
+        freq_grid = torch.linspace(0, 1, fmm.size(1), device=device).view(1, 1, 1, -1)
+        powers = torch.arange(4, device=device).view(1, 1, 4, 1)
+        freq_vectors = freq_grid ** powers # (1, 1, 4, Freqs)
+        
+        poly_p = 1.0 + torch.sum(op_pade_num.unsqueeze(-1) * freq_vectors, dim=2).transpose(1, 2)
+        poly_q = 1.0 + torch.sum(op_pade_den.unsqueeze(-1) * freq_vectors, dim=2).transpose(1, 2)
+        
+        # This is the highly accurate 4th-degree filtered spectral wave
+        spectral_wave = torch.fft.irfft(fmm * (poly_p / (poly_q + 1e-6)), n=T + 2 * T, dim=1)[:, T:-T, :]
+
+        # 6. Metrics and Phase Latents
+        mag_sq = (spectral_wave * spectral_wave.conj()).real + 1e-8
+        connection = torch.cumsum(mag_sq, dim=1)
+        phase_latents = torch.complex(torch.cos(connection), torch.sin(connection))
+        prob = mag_sq / (mag_sq.sum(dim=-1, keepdim=True) + 1e-8)
+
+        # 7. Execution of Parallel Superposition Branches
+        # High precision parameters acting inside completely separate gradient highways!
+        branch_shift = (xcomplex + torch.roll(xcomplex.conj(), shifts=1, dims=-1)) * op_shift
+        branch_scale = (spectral_wave * torch.rsqrt(mag_sq + 1.0)) * op_shift 
+        branch_twist = (xcomplex * phase_latents) * op_twist
+        branch_damp  = (spectral_wave - (xcomplex * (torch.log(prob) + 1.0))) * op_damp
+        
+        # Additive combination guarantees flawless backpropagation
+        unified_evolution = branch_shift + branch_scale + branch_twist + branch_damp
+        
+        # Noise scaling governed dynamically by damp operator bounds
+        noise = torch.view_as_complex(torch.randn((*xcomplex.shape, 2), device=device)) * op_damp.abs().mean()
+        final_wave = (unified_evolution + noise) * phase_latents
+        
+        return final_wave.real
+
+------>:
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class UnifiedCrystallineMatrixOcean(nn.Module):
+    def __init__(self, emb=384, block=32, levels=12, layers=4, experts=8, wgain=0.02):
+        super().__init__()
+        self.block = block
+        self.emb = emb
+        
+        # 1. TOTAL GEOMETRIC RESOLUTION MESHGRID
+        levels_co, layers_co, experts_co, emb_co = torch.meshgrid(
+            torch.linspace(0.01, 1.0, levels),
+            torch.linspace(0.0, 1.0, layers),
+            torch.linspace(0.0, 1.0, experts),
+            torch.linspace(0.0, 1.0, self.emb), 
+            indexing='ij'
+        )
+        coords_flat = torch.stack([levels_co, layers_co, experts_co, emb_co], dim=-1).view(-1, 4)
+        
+        # Compute multi-scale frequency boundaries
+        idx = torch.arange(0, self.block // 2).float()
+        bases = torch.logspace(4, 6, levels, base=10.0)
+        frequencies = 1.0 / (bases.unsqueeze(1) ** (idx / (self.block // 2)))
+        
+        # Bake initial wave vectors
+        angles = frequencies.unsqueeze(0) + coords_flat[:, 3:4]
+        wave_real = (torch.cos(angles) * wgain).mean(dim=-1).view(levels, layers, experts, self.emb)
+        wave_imag = (torch.sin(angles) * wgain).mean(dim=-1).view(levels, layers, experts, self.emb)
+        base_complex_field = torch.complex(wave_real, wave_imag) # Shape: (Levels, Layers, Experts, C)
+
+        # 2. THE UNIFIED SYNTHESIS EXPANSION
+        # We spawn the vectors and matrices out of the same clean geometric foundation!
+        op_shift = base_complex_field.unsqueeze(-1) # (L, L, E, C, 1)
+        op_twist = base_complex_field.unsqueeze(-1) # (L, L, E, C, 1)
+        op_damp  = base_complex_field.unsqueeze(-1) # (L, L, E, C, 1)
+        
+        # Matrix Expansion: We tile the base channel field into a full (C, C) communication plane
+        # This keeps VRAM light at initialization but gives us true Full-Rank Matrix properties!
+        matrix_A = base_complex_field.unsqueeze(-1).expand(-1, -1, -1, -1, self.emb)
+        matrix_C = base_complex_field.unsqueeze(-1).expand(-1, -1, -1, -1, self.emb)
+        
+        # Concatenate everything into ONE single master manifold parameter
+        # 3 Vectors of width 1 + 2 Matrices of width C = Total final slot dimension of (3 + 2*C)
+        self.universal_manifold = nn.Parameter(
+            torch.cat([op_shift, op_twist, op_damp, matrix_A, matrix_C], dim=-1)
+        )
+
+    def forward(self, x):
+        B, T, C = x.shape
+        device = x.device
+        
+        # 1. Unpack the full-resolution genome field without collapsing anything
+        # Each tensor maintains shapes like: (L, Y, E, C)
+        op_shift = self.universal_manifold[:, :, :, :C, 0]
+        op_twist = self.universal_manifold[:, :, :, :C, 1]
+        op_damp  = self.universal_manifold[:, :, :, :C, 2]
+        
+        # Base vectors for matrix generation
+        A_base = self.universal_manifold[:, :, :, :C, 3]
+        C_base = self.universal_manifold[:, :, :, :C, 4]
+
+        # Convert tokens to complex domain
+        xcomplex = torch.complex(x, torch.zeros_like(x)) # (B, T, C)
+        
+        # 2. TOTAL PARALLEL CONTRACTON (All layers, levels, and experts at once)
+        # We generate a full-rank cross-channel matrix projection implicitly via outer products
+        # 'bti' is your input. 'lyei' and 'lyej' form the implicit (C, C) mixing matrix per grid point.
+        # Output shape: (B, T, L, Y, E, C) -> Every token interacts with every point in the genome.
+        num_project = torch.einsum('bti, lyei, lyej -> btlyec', xcomplex, A_base, A_base)
+        den_project = torch.einsum('bti, lyei, lyej -> btlyec', xcomplex, C_base, C_base)
+        
+        # Conformal Möbius activation mapping executed directly over full-rank mixing states
+        branch_mobius_matrix = num_project / (den_project + 1e-6)
+
+        # 5. PHYSICAL WAVE FLUID METRICS
+        mag_sq = (branch_mobius_matrix * branch_mobius_matrix.conj()).real + 1e-8
+        connection = torch.cumsum(mag_sq, dim=1)
+        phase_latents = torch.complex(torch.cos(connection), torch.sin(connection))
+        prob = mag_sq / (mag_sq.sum(dim=-1, keepdim=True) + 1e-8)
+
+        # 6. PARALLEL SUPERPOSITION BLOCK
+        # Vectors scale channels independently while the Matrix branch maps cross-channel dependencies
+        branch_shift = (xcomplex + torch.roll(xcomplex.conj(), shifts=1, dims=-1)) * op_shift
+        branch_scale = (branch_mobius_matrix * torch.rsqrt(mag_sq + 1.0)) * op_shift 
+        branch_twist = (xcomplex * phase_latents) * op_twist
+        branch_damp  = (branch_mobius_matrix - (xcomplex * (torch.log(prob) + 1.0))) * op_damp
+        
+        # Clean additive combination
+        unified_evolution = branch_shift + branch_scale + branch_twist + branch_mobius_matrix + branch_damp
+        
+        # Thermal Dispersion
+        noise = torch.view_as_complex(torch.randn((*xcomplex.shape, 2), device=device)) * op_damp.abs().mean()
+        final_wave = (unified_evolution + noise) * phase_latents
+        
+        return final_wave.real
+
+------>:
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class UnifiedSpectralEngine(nn.Module):
+    def __init__(self, max_t=2048, emb=384, wgain=0.02):
+        super().__init__()
+        self.emb = emb
+        self.max_t = max_t
+        self.max_fft_len = (3 * max_t) // 2 + 1
+
+        # 1. LIGHTWEIGHT AXES (No heavy meshgrids at initialization)
+        emb_in_co  = torch.linspace(0.0, 1.0, self.emb).view(self.emb, 1, 1)      # (C_in, 1, 1)
+        freq_co    = torch.linspace(0.0, 1.0, self.max_fft_len).view(1, self.max_fft_len, 1) # (1, Freq, 1)
+        emb_out_co = torch.linspace(0.0, 1.0, self.emb).view(1, 1, self.emb)      # (1, 1, C_out)
+
+        # 2. COMPUTE PHYSICS COUPLINGS VIA BROADCASTING
+        sobolev_rates = torch.tensor([0.1, 1.0, 2.0]).view(-1, 1, 1, 1)
+        sobolev_attenuation = torch.exp(-sobolev_rates * freq_co).mean(dim=0)
+
+        helicity_steps = torch.tensor([-1.0, 0.0, 1.0]).view(-1, 1, 1, 1)
+        helicity_twist = torch.sin(helicity_steps * torch.pi * emb_in_co).mean(dim=0)
+
+        poly_num = freq_co * sobolev_attenuation
+        poly_den = (freq_co ** 3.0) * (1.0 + helicity_twist.abs())
+
+        maslov_shifts = torch.tensor([0.0, 1.0, 2.0, 3.0]) * (torch.pi / 2.0)
+        base_phase = maslov_shifts.mean() + (freq_co * torch.pi)
+
+        # 3. BUILD THE GENOMES (Leveraging broadcasting instead of manual .expand)
+        p_real = torch.cos(base_phase + (emb_in_co * 0.05)) * poly_num * wgain
+        p_imag = torch.sin(base_phase + (emb_in_co * 0.05)) * poly_num * wgain
+        q_real = torch.cos(base_phase + (emb_out_co * 0.05)) * poly_den * wgain
+        q_imag = torch.sin(base_phase + (emb_out_co * 0.05)) * poly_den * wgain
+
+        # 4. PACK EVERYTHING INTO ONE SINGLE LEAN FLOAT PARAMETER
+        # Dimension 0 holds: [0: P_real, 1: P_imag, 2: Q_real, 3: Q_imag]
+        # Memory is cleanly allocated once here without compounding .expand() bugs
+        self.unified_manifold = nn.Parameter(
+            torch.stack([
+                p_real.broadcast_to(self.emb, self.max_fft_len, self.emb),
+                p_imag.broadcast_to(self.emb, self.max_fft_len, self.emb),
+                q_real.broadcast_to(self.emb, self.max_fft_len, self.emb),
+                q_imag.broadcast_to(self.emb, self.max_fft_len, self.emb)
+            ], dim=0)
+        )
+
+    def forward(self, x):
+        B, T, C = x.shape
+        current_fft_len = (3 * T) // 2 + 1
+
+        # Slice our single unified parameter block seamlessly
+        P_real = self.unified_manifold[0, :C, :current_fft_len, :C]
+        P_imag = self.unified_manifold[1, :C, :current_fft_len, :C]
+        Q_real = self.unified_manifold[2, :C, :current_fft_len, :C]
+        Q_imag = self.unified_manifold[3, :C, :current_fft_len, :C]
+
+        # Non-blocking quantization simulation
+        scale_x = 127.0 / (torch.mean(x.abs(), dim=-1, keepdim=True) * 3.0 + 1e-8)
+        x_dequant = (x * scale_x).round().clamp(-128, 127) / scale_x
+
+        # Fourier transform sequence into spectral coordinates
+        x_padded = F.pad(x_dequant.transpose(1, -1), (T, T), mode='circular').transpose(1, -1)
+        fmm = torch.fft.rfft(x_padded, n=3 * T, dim=1)
+
+        # Unpacked Complex Matrix Contractions (TensorCore / Triton Friendly)
+        fmm_P_real = torch.einsum('bfi,ifj->bfj', fmm.real, P_real) - torch.einsum('bfi,ifj->bfj', fmm.imag, P_imag)
+        fmm_P_imag = torch.einsum('bfi,ifj->bfj', fmm.real, P_imag) + torch.einsum('bfi,ifj->bfj', fmm.imag, P_real)
+
+        fmm_Q_real = torch.einsum('bfi,ifj->bfj', fmm.real, Q_real) - torch.einsum('bfi,ifj->bfj', fmm.imag, Q_imag)
+        fmm_Q_imag = torch.einsum('bfi,ifj->bfj', fmm.real, Q_imag) + torch.einsum('bfi,ifj->bfj', fmm.imag, Q_real)
+
+        # Rational Conformal Division
+        denom = (fmm_Q_real ** 2) + (fmm_Q_imag ** 2) + 1e-6
+        div_real = (fmm_P_real * fmm_Q_real + fmm_P_imag * fmm_Q_imag) / denom
+        div_imag = (fmm_P_imag * fmm_Q_real - fmm_P_real * fmm_Q_imag) / denom
+
+        transformed_fmm = torch.complex(div_real, div_imag)
+
+        # Re-materialize to real spacetime coordinates (discards imaginary drift automatically)
+        out_fmm = torch.fft.irfft(transformed_fmm, n=3 * T, dim=1)[:, T:-T, :]
+        return torch.clamp(out_fmm, min=-50.0, max=50.0)
+
+------>:
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class CompleteStructuredTiledEngine(nn.Module):
+    def __init__(self, window_size=512, levels=4, layers=12, 
+                 experts=8, block_size=32, wgain=0.02, emb=512):
+        super().__init__()
+        
+        # Explicit multi-level topological layout
+        self.levels = levels
+        self.layers = layers
+        self.experts = experts
+        
+        # Calculate full structural hidden embedding size
+        self.emb = emb
+        assert self.emb % block_size == 0, f"Embedding ({self.emb}) must be divisible by block_size ({block_size})."
+        
+        # Overlap-Save Static Parameters (Replaces dynamic max_t configurations)
+        self.window_size = window_size
+        self.max_fft_len = window_size // 2 + 1
+        self.block_size = block_size
+        self.num_blocks = self.emb // block_size
+
+        # =====================================================================
+        # 1. FLAT STRUCTURED COORDINATE AXES (Sweeping 0 to 1 Spectrum)
+        # =====================================================================
+        emb_in_co  = torch.linspace(0.0, 1.0, self.emb).view(self.emb, 1, 1)
+        freq_co    = torch.linspace(0.0, 1.0, self.max_fft_len).view(1, self.max_fft_len, 1)
+        emb_out_co = torch.linspace(0.0, 1.0, self.emb).view(1, 1, self.emb)
+
+        # Log-spaced scale base matching your frequency sweep configuration
+        bases = torch.logspace(4.0, 6.0, self.max_fft_len).view(1, self.max_fft_len, 1)
+        log_frequencies = 1.0 / (bases ** freq_co)
+
+        # =====================================================================
+        # 2. PHYSICS COUPLINGS VIA TOPOLOGY MULTIPLIERS
+        # =====================================================================
+        # Scale physics properties directly using levels and layers
+        sobolev_rates = (torch.tensor([0.1, 1.0, 2.0]) * self.levels).view(-1, 1, 1, 1)
+        sobolev_attenuation = torch.exp(-sobolev_rates * freq_co).mean(dim=0)
+
+        helicity_steps = (torch.tensor([-1.0, 0.0, 1.0]) * self.layers).view(-1, 1, 1, 1)
+        helicity_twist = torch.sin(helicity_steps * torch.pi * emb_in_co).mean(dim=0)
+
+        # Rational polynomial structures combined with log-spaced frequency scaling
+        poly_num = freq_co * sobolev_attenuation * log_frequencies
+        poly_den = (freq_co ** 3.0) * (1.0 + helicity_twist.abs())
+
+        # Scale Maslov shifts via the structural layout of your expert pool
+        maslov_shifts = torch.tensor([0.0, 1.0, 2.0, 3.0]) * (torch.pi / 2.0) * self.experts
+        base_phase = maslov_shifts.mean() + (freq_co * torch.pi)
+
+        # Progressive Decay Envelope forcing high spectrum factors to zero
+        progressive_decay = torch.exp(-3.0 * (emb_in_co + freq_co + emb_out_co) / 3.0)
+
+        # =====================================================================
+        # 3. BUILD POLYNOMIAL MÖBIUS BASES
+        # =====================================================================
+        p_real = (torch.cos(base_phase + (emb_in_co * 0.05)) * poly_num * wgain * progressive_decay).broadcast_to(self.emb, self.max_fft_len, self.emb)
+        p_imag = (torch.sin(base_phase + (emb_in_co * 0.05)) * poly_num * wgain * progressive_decay).broadcast_to(self.emb, self.max_fft_len, self.emb)
+        q_real = (torch.cos(base_phase + (emb_out_co * 0.05)) * poly_den * wgain * progressive_decay).broadcast_to(self.emb, self.max_fft_len, self.emb)
+        q_imag = (torch.sin(base_phase + (emb_out_co * 0.05)) * poly_den * wgain * progressive_decay).broadcast_to(self.emb, self.max_fft_len, self.emb)
+
+        # Chop and permute into native hardware tiles: [4, Num_Blk_In, Num_Blk_Out, Freq, 32, 32]
+        flat_stack = torch.stack([p_real, p_imag, q_real, q_imag], dim=0)
+        blocked_shape = (4, self.num_blocks, self.block_size, self.max_fft_len, self.num_blocks, self.block_size)
+        
+        self.unified_tiles = nn.Parameter(
+            flat_stack.view(blocked_shape).permute(0, 1, 4, 3, 2, 5).contiguous()
+        )
+
+    def forward(self, x, h_cache=None):
+        """
+        x: Input tensor shape [B, T, C]
+        h_cache: Historical sliding overlap tokens. Shape [B, M-1, C]
+                 where M is the effective history memory cutoff (window_size // 4)
+        """
+        B, T, C = x.shape
+        W = self.window_size
+        M_minus_1 = W // 4  # Boundary history length for Overlap-Save artifact management
+        
+        # 1. Manage the Overlap-Save boundary history without changing memory layouts
+        if h_cache is not None:
+            full_chunk = torch.cat([h_cache, x], dim=1)
+        else:
+            # Cold-start pad to fulfill initial historical slice constraints
+            full_chunk = F.pad(x.transpose(1, 2), (M_minus_1, 0), mode='constant', value=0.0).transpose(1, 2)
+            
+        chunk_len = full_chunk.shape[1]
+        
+        # Extract slices mapping natively to the pre-computed static FFT window size
+        if chunk_len < W:
+            segment = F.pad(full_chunk.transpose(1, 2), (0, W - chunk_len), mode='constant', value=0.0).transpose(1, 2)
+        else:
+            segment = full_chunk[:, -W:, :]
+
+        # 2. Slice parameter blocks matching the absolute static frequency limit
+        P_real = self.unified_tiles[0]
+        P_imag = self.unified_tiles[1]
+        Q_real = self.unified_tiles[2]
+        Q_imag = self.unified_tiles[3]
+
+        # 3. UN-PADDED CIRCULAR SPECTRAL FFT PROJECTION (Zero dynamic allocation bounds)
+        fmm = torch.fft.rfft(segment, n=W, dim=1) / torch.sqrt(torch.tensor(W, dtype=torch.float32))
+
+        # View and reshape into 32-wide hardware channel segments
+        fmm_real = fmm.real.view(B, self.max_fft_len, self.num_blocks, self.block_size).permute(0, 2, 1, 3)
+        fmm_imag = fmm.imag.view(B, self.max_fft_len, self.num_blocks, self.block_size).permute(0, 2, 1, 3)
+
+        # Hardware-accelerated tile contractions
+        fmm_P_real = torch.einsum('bifx,iofxy->bofy', fmm_real, P_real) - torch.einsum('bifx,iofxy->bofy', fmm_imag, P_imag)
+        fmm_P_imag = torch.einsum('bifx,iofxy->bofy', fmm_real, P_imag) + torch.einsum('bifx,iofxy->bofy', fmm_imag, P_real)
+
+        fmm_Q_real = torch.einsum('bifx,iofxy->bofy', fmm_real, Q_real) - torch.einsum('bifx,iofxy->bofy', fmm_imag, Q_imag)
+        fmm_Q_imag = torch.einsum('bifx,iofxy->bofy', fmm_real, Q_imag) + torch.einsum('bifx,iofxy->bofy', fmm_imag, Q_real)
+
+        # =====================================================================
+        # 4. CONFORMAL MÖBIUS SPECTRAL GATE
+        # =====================================================================
+        denom = (fmm_Q_real ** 2) + (fmm_Q_imag ** 2) + 1e-6
+        div_real = (fmm_P_real * fmm_Q_real + fmm_P_imag * fmm_Q_imag) / denom
+        div_imag = (fmm_P_imag * fmm_Q_real - fmm_P_real * fmm_Q_imag) / denom
+
+        # Flatten frequency dimensions cleanly back to original layout
+        transformed_fmm = torch.complex(div_real, div_imag).permute(0, 2, 1, 3).reshape(B, self.max_fft_len, self.emb)
+
+        # Inverse FFT returning to time domain
+        y_full = torch.fft.irfft(transformed_fmm, n=W, dim=1)
+        y_full = torch.clamp(y_full, min=-50.0, max=50.0)
+
+        # =====================================================================
+        # 5. OVERLAP-SAVE ARTIFACT DISCARD STEP
+        # =====================================================================
+        # We explicitly drop the circular aliased boundary front, keeping only valid elements
+        valid_length = min(T, W - M_minus_1)
+        out_fmm = y_full[:, M_minus_1:M_minus_1 + T, :]
+
+        # Extract precise trailing history tokens for the next inference step
+        next_cache = full_chunk[:, -M_minus_1:, :]
+
+        return out_fmm, next_cache
