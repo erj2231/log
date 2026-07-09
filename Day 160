@@ -1,0 +1,70 @@
+So well doing refactoring i understood that really eveyrthing there is similar isnt it? and 
+istarted to make One United Code. there i tried to unite fsq, experts, layers, rope and make it
+with even changing emb space so that it learns tho its obviously not ready but well...
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+class full(nn.Module):
+    def __init__(self, rank=4, alpha=8, block=32, levels=225, wgain=0.02, 
+                 again=0.1, experts=8, emb=384, dims=12, layers=24):
+        super().__init__()
+        full = levels * layers * experts
+        self.block = block
+        self.numb = full // block
+        bases = torch.exp(torch.linspace(0, 1, dims) * (torch.log(torch.tensor(10000.0)) - 
+                           torch.log(torch.tensor(1000000.0))) + 
+                           torch.log(torch.tensor(1000000.0)))
+        frequencies = 1.0 / (bases.unsqueeze(1) ** (torch.arange(0, self.block).float() / self.block))
+        harmonicbase = frequencies.mean(dim=0).unsqueeze(-1) 
+        space = harmonicbase.repeat(self.numb, 1, 1)         
+        space = space * (emb / space.max())
+        self.func = nn.Parameter(torch.randn(self.numb, self.block, 1) 
+                                 * wgain + space)
+
+        self.rank = rank
+        self.scale = alpha / rank
+        self.loraa = nn.Parameter(torch.empty(self.numb, rank))
+        self.lorab = nn.Parameter(torch.zeros(rank, self.block))
+        nn.init.kaiming_uniform_(self.loraa, a=again)
+        self.k1 = 2*2*8 // rank
+        self.k2 = 2*2*8 // self.k1
+
+        self.dims = dims
+        bases = torch.exp(torch.linspace(0, 1, dims) * 
+                          (torch.log(torch.tensor(10000.0)) - 
+                           torch.log(torch.tensor(1000000.0))) + 
+                           torch.log(torch.tensor(1000000.0)))
+        invslist = []
+        for b in bases:
+            inv = 1.0/(b**(torch.arange(0, emb//dims, 2).float()/(emb//dims)))
+            invslist.append(inv)
+        invs = torch.stack(invslist)
+        t = torch.arange(4096).float()
+        phase = torch.einsum('i, j l -> i j l', t, invs)
+        cosin = torch.exp(1j * phase)
+        self.register_buffer('cosin', cosin)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        xroped = x.view(B, T, self.dims, -1, 2)
+        xcomplex = torch.view_as_complex(xroped)
+        xrotated = xcomplex * self.cosin[:T].unsqueeze(0)
+        xnormal = torch.view_as_real(xrotated).flatten(2)
+        
+        xsmall = F.adaptive_avg_pool1d(xnormal, self.rank)
+        blockscores = torch.matmul(xsmall, self.loraa.t())
+        _, topk1indices = torch.topk(blockscores, k=self.k1, dim=-1) 
+        flatblockindices = topk1indices.view(-1) 
+        chosenfunc = self.func[flatblockindices].squeeze(-1)    
+        chosenloraa = self.loraa[flatblockindices].unsqueeze(1) 
+        blockdeltas = torch.matmul(chosenloraa, self.lorab).squeeze(1) * self.scale
+        candidateelementscores = (chosenfunc + blockdeltas).view(B, T, self.k1, self.block)
+        topk2scores, _ = torch.topk(candidateelementscores, k=self.k2, dim=-1) 
+        probs = F.softmax(topk2scores, dim=-1)
+        flatprobs = probs.view(B, T, self.k1 * self.k2) 
+        gateprobs = flatprobs[:, :, :16]
+        downprobs = flatprobs[:, :, 16:]
+        gatedfeatures = F.silu(xnormal * gateprobs.mean(dim=-1, keepdim=True))
+        modulatedoutput = gatedfeatures * downprobs.mean(dim=-1, keepdim=True)
+        return x + modulatedoutput
