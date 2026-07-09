@@ -1,0 +1,1226 @@
+So right now what im doing is global refactoring... before even tho my code was working... it 
+really was not as loss was going down in half only in 2 days on my ryzen7320u radeon610m and 
+that sucks... thats why im going further and optimizing aka 'innovating' my code: first what ive
+done was to rewrite all my blocks (including rms fsq etc from scratch so that i can at least 
+write them on my own somehow (still bad i would say and i need ai help) but overall ive 
+understood the logics and relooked at my entire journey: first i built basic ai (predictor) that
+compares multiplication of weights and data to target and += loss aka 'sum(v*w for vw in zip),
+for range w+='. second version was more advanced as there was now softmax for proportions and
+log for loss 'softmax -math.log'. in fifth i added bias (helpful especially for small ai). in 
+seventh i added more neurons (hidden ones) + relu for nonlinearity. in eighth momentum and now
+w -= lr * momentum. then in ninth i explored trees and svms. i would say now that they are 
+similar one to parallel scan and hessian like optimizers. in tenth i added regularization. in 
+eleventh velocity and /= margin. in twelth explicit dropout, batch and if random > dropout + i 
+started to use enumerate. in thirteenth added qkv and explicit backwards now (it became just too
+massive for small one). in fourteenth added position, heads. in fifteenth casual masking, block,
+looking up (generation). in sixteenth a lot of transposes and matmuls (before elementswise was).
+in seventeenth stds, means, lngs and lnbs. in eighteenth rope and layers (looping). in 
+nineteenth: rms, mla cache, lnn, swiglu, multi token, pred state (quite productive huh). then 
+loadbalance and mrrope + lru. then i idled. and again. and again. and again... then matryoshka
+and quantization lora and well now optimizing even them. Well, now, lets go back to my code 
+Right Now: i left bpe the same (too much trouble and no gain right now), then in rms (and all
+other blocks) i removed that active4 slicing of data (i will now only once slice it in the 
+beginning, and thats it). in fsq i: 1. refactored the whole for loop logic for both levels and 
+computations + confidence projection as i wanted: to make it fast and parallel 2. to make it 
+non dependable so that i can remove confident tokens whenever i want without breaking the whole
+logic (it works only half unfortunately). 2. i rewrote for that logic all left code, lora etc.
+then i made fsq2 class Only for Moe with its experts, now how it works: we have here not linear
+obviously so we expert baseweight that we slice [0] or [1] for in and outs. then // block of 32
+too. then all the same But + experts line in w and conf params. also we expert in fw already 
+calculated indices (topk2 like in advanced models for efficiency) that we then flat out (it
+saves us a Lot of Trouble as we now dont have to slice everything and everyone just to indice
+at one last line) + repeat interleave for data to work out. Oh and also we have to do
+more preparing for xselected (expand then gather and only then slice) but well yeah, thats it.
+mrrope the same. new Mla just simplified (no stupid quantize val calls). moe the same: we now 
+just take data reshape then topk2 then fsq wq and wo and that's it. then lnn and swiglu the 
+same. lru - that's where something happens: i fixed conv logic (now only one true conv call not
+conv and conv1 thing) + obviously fsq calls in weights + if T > 1 not if training - that was 
+stupid. heds the same just again simplified without all that trash. layer too. and model class
+i designed just like fsq: we // block + we pass through lnum block so if we want we can 
+'escape' + with each pass smaller emb we have (so it specializes) and well thats it. generate 
+the same. And also i fixed a lot of small errors through def functions like loadbalance or val 
+sizes etc then well everything the same. yeah.
+
+import os
+import torch
+import shutil
+
+torch.compiler.reset()
+cache_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Temp", "torchinductor_user")
+if os.path.exists(cache_dir):
+    shutil.rmtree(cache_dir)
+
+msvc_bin = r"C:\msvc\bin\Hostx64\x64"
+msvc_base = r"C:\msvc"
+sdk_base = r"D:\Windows Kits\10"
+sdk_ver = "10.0.26100.0"
+
+os.environ["CXX"] = os.path.join(msvc_bin, "cl.exe")
+essential_paths = [
+    msvc_bin,
+    r"C:\Windows\system32",
+    r"C:\Windows",
+    r"d:\system\python" 
+]
+os.environ["PATH"] = os.pathsep.join(essential_paths)
+os.environ["INCLUDE"] = fr"{msvc_base}\include;{sdk_base}\include\{sdk_ver}\ucrt;{sdk_base}\include\{sdk_ver}\um;{sdk_base}\include\{sdk_ver}\shared"
+os.environ["LIB"] = fr"{msvc_base}\lib\x64;{sdk_base}\lib\{sdk_ver}\ucrt\x64;{sdk_base}\lib\{sdk_ver}\um\x64"
+
+import regex as re
+class bpe:
+    def __init__(self, v):
+        self.v = v
+        self.merges = {}
+        self.vocab = {i: bytes([i]) for i in range(256)}
+        self.cache = {}
+        self.split_pattern = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+    def train(self, text):
+        wordcounts = {} 
+        for match in re.finditer(self.split_pattern, text):
+            word = match.group()
+            tokens = tuple(word.encode('utf-8'))
+            wordcounts[tokens] = wordcounts.get(tokens, 0) + 1
+
+        stats = {}
+        for tokens, freqs in wordcounts.items():
+            for pair in zip(tokens, tokens[1:]):
+                stats[pair] = stats.get(pair, 0) + freqs
+
+        for v in range(self.v - 256):
+            if not stats: break
+
+            max_pair = max(stats, key=stats.get)
+            idx = 256 + v
+            self.merges[max_pair] = idx
+            self.vocab[idx] = self.vocab[max_pair[0]] + self.vocab[max_pair[1]]
+
+            newwordcounts = {}
+            for wordtokens, freq in wordcounts.items():
+                if max_pair[0] in wordtokens and max_pair[1] in wordtokens:
+                    for p in zip(wordtokens, wordtokens[1:]):
+                        stats[p] -= freq
+
+                    newtokens = self.merge(wordtokens, max_pair, idx)
+                    newwordcounts[newtokens] = freq
+
+                    for p in zip(newtokens, newtokens[1:]):
+                        stats[p] = stats.get(p, 0) + freq
+                else:
+                    newwordcounts[wordtokens] = freq
+
+            wordcounts = newwordcounts
+            stats = {p: f for p, f in stats.items() if f > 0}
+
+    def merge(self, tokens, maxpair, idx):
+        newtokens = []
+        i = 0
+        while i < len(tokens):
+            if i < len(tokens) - 1 and (tokens[i], tokens[i + 1]) == maxpair:
+                newtokens.append(idx)
+                i += 2
+            else:
+                newtokens.append(tokens[i])
+                i += 1
+        return tuple(newtokens)
+    
+    def encode(self, text):
+        if text in self.cache: return self.cache[text]
+        wordchunks = re.findall(self.split_pattern, text)
+        finalids = []
+        for word in wordchunks:
+            finalids.extend(self.encodeword(word))
+        if len(self.cache) >= 200:
+            oldest = next(iter(self.cache))
+            del self.cache[oldest]
+        self.cache[text] = finalids
+        return finalids
+    
+    def encodeword(self, word):
+        tokens = list(word.encode('utf-8'))
+
+        while len(tokens) >= 2:
+            bestpair = None
+            minidx = float('inf')
+            for i in range(len(tokens) - 1):
+                pair = (tokens[i], tokens[i + 1])
+                idx = self.merges.get(pair)
+                if idx is not None and idx < minidx:
+                    bestpair = pair
+                    minidx = idx
+
+            if bestpair is None:
+                break
+            tokens = list(self.merge(tokens, bestpair, minidx))
+        return tokens
+    
+    def decode(self, ids):
+        return b"".join(self.vocab.get(i, b"<?>") for i in ids).decode('utf-8', errors='replace')
+
+import torch
+import torch.nn as nn
+class rms(nn.Module):
+    def __init__(self, emb=512):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(emb))
+    
+    def forward(self, x, fsq):
+        norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)
+        wsliced = self.weight[:fsq]
+        final = norm * wsliced
+        return final
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class fsq(nn.Module):
+    def __init__(self, in_features, out_features, rank=4, alpha=8, block=32, 
+                 wgain=0.02, again=0.1, levels=[75, 75, 75]):
+        super().__init__()
+        self.lnum = len(levels)
+        self.lvalue = levels[0]
+        self.block = block
+        self.numouts = out_features // block
+        
+        self.numins_list = []
+        current = in_features
+        for i in range(self.lnum):
+            self.numins_list.append(current // block)
+            if i < self.lnum - 1:
+                current = ((current // 2 + current // 4) // block) 
+        self.total_global_ins = sum(self.numins_list)
+        total_decayed_features = sum(self.numins_list) 
+        self.global_down_w = nn.Parameter(torch.zeros(in_features, total_decayed_features))
+        
+        with torch.no_grad():
+            self.global_down_w[:, :in_features] = torch.eye(in_features)
+            current_offset = in_features
+            current = in_features
+            for i in range(self.lnum - 1):
+                next_dim = ((current // 2 + current // 4) // block) * block
+                w_slice = torch.empty(in_features, next_dim)
+                nn.init.kaiming_uniform_(w_slice, a=again)
+                self.global_down_w[:, current_offset : current_offset + next_dim] = w_slice
+                current_offset += next_dim
+                current = next_dim
+
+        self.w = nn.Parameter(
+            torch.randn(self.total_global_ins, self.lvalue, self.numouts, block, block) * wgain
+        )
+        self.conf = nn.Parameter(
+            torch.ones(self.total_global_ins, self.lvalue, self.numouts)
+        )
+        self.scale = alpha / rank
+        self.loraa = nn.Parameter(torch.empty(in_features, rank))
+        self.lorab = nn.Parameter(torch.zeros(rank, out_features))
+        nn.init.kaiming_uniform_(self.loraa, a=again)
+
+    def forward(self, x, tau):
+        target_dtype = x.dtype
+        B, T, _ = x.shape
+        fused_projections = torch.einsum('bti, io -> bto', x, self.global_down_w.to(dtype=target_dtype))
+        x_global = fused_projections.view(B, T, self.total_global_ins, self.block)
+        bconf = torch.sigmoid(self.conf)
+        bnoised = bconf + (torch.rand_like(bconf) - 0.5) * (tau * 0.02)
+        
+        flatconf = bnoised.view(-1)
+        kblock = min(32, flatconf.shape[-1])
+        scores, indices = torch.topk(flatconf, k=kblock, dim=-1) 
+        
+        outcoords = indices % self.numouts
+        remainder = torch.div(indices, self.numouts, rounding_mode='floor')
+        vcoords = remainder % self.lvalue
+        global_in_coords = torch.div(remainder, self.lvalue, rounding_mode='floor') 
+        
+        wtile = self.w[global_in_coords, vcoords, outcoords] 
+        conf_selected = torch.sigmoid(self.conf[global_in_coords, vcoords, outcoords])
+        
+        curscale = torch.exp(torch.clamp(conf_selected, -5.0, 5.0))
+        wscaled = wtile * (9.0 / (curscale + 1e-6)).unsqueeze(-1).unsqueeze(-1).to(dtype=target_dtype)
+        wqresidual = (-wscaled).detach() + wscaled
+        
+        x_selected = x_global[:, :, global_in_coords] 
+        ein = torch.einsum('btki, kio -> btko', x_selected, wqresidual)
+        ein = ein * scores.unsqueeze(0).unsqueeze(-1).to(dtype=target_dtype)
+        
+        accum = torch.zeros(B, T, self.numouts, self.block, device=x.device, dtype=target_dtype)
+        out_expand = outcoords.view(1, 1, kblock, 1).expand(B, T, kblock, self.block)
+        
+        accum.scatter_add_(dim=2, index=out_expand, src=ein)
+        accum = accum.view(B, T, -1)
+        
+        resa = torch.einsum('bti, ir -> btr', x, self.loraa.to(dtype=target_dtype))
+        if self.training:
+            resa = F.dropout(resa, p=0.1) * 0.9
+        loraout = torch.einsum('btr, ro -> bto', resa, self.lorab.to(dtype=target_dtype)) * self.scale
+        
+        return accum + loraout
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class fsq2(nn.Module):
+    def __init__(self, baseweight=None, rank=4, alpha=8, experts=8, block=32, 
+                 wgain=0.02, again=0.1, levels=[75, 75, 75]):
+        super().__init__()
+        self.lnum = len(levels)
+        self.lvalue = levels[0]
+        self.block = block
+        in_features = baseweight[0]
+        out_features = baseweight[1]
+        self.numouts = out_features // block
+        
+        self.numins_list = []
+        current = in_features
+        for i in range(self.lnum):
+            self.numins_list.append(current // block)
+            if i < self.lnum - 1:
+                current = ((current // 2 + current // 4) // block) 
+        self.total_global_ins = sum(self.numins_list)
+        total_decayed_features = sum(self.numins_list) 
+        self.global_down_w = nn.Parameter(torch.zeros(in_features, total_decayed_features))
+        
+        with torch.no_grad():
+            self.global_down_w[:, :in_features] = torch.eye(in_features)
+            current_offset = in_features
+            current = in_features
+            for i in range(self.lnum - 1):
+                next_dim = ((current // 2 + current // 4) // block) * block
+                w_slice = torch.empty(in_features, next_dim)
+                nn.init.kaiming_uniform_(w_slice, a=again)
+                self.global_down_w[:, current_offset : current_offset + next_dim] = w_slice
+                current_offset += next_dim
+                current = next_dim
+
+        self.w = nn.Parameter(
+            torch.randn(self.total_global_ins, experts, self.lvalue, self.numouts, block, block) * wgain
+        )
+        self.conf = nn.Parameter(
+            torch.ones(self.total_global_ins, experts, self.lvalue, self.numouts)
+        )
+        self.scale = alpha / rank
+        self.loraa = nn.Parameter(torch.empty(in_features, rank))
+        self.lorab = nn.Parameter(torch.zeros(rank, out_features))
+        nn.init.kaiming_uniform_(self.loraa, a=again)
+
+    def forward(self, x, kindices, tau):
+        target_dtype = x.dtype
+        B, T, _ = x.shape
+        kindicesflat = kindices.view(-1)
+        xflat = x.view(B*T, -1).repeat_interleave(2, dim=0)
+        fused_projections = torch.einsum('bti, io -> bto', xflat, self.global_down_w.to(dtype=target_dtype))
+        x_global = fused_projections.view(B*T*2, self.total_global_ins, self.block)
+        bconf = torch.sigmoid(self.conf[:, kindicesflat, :, :])
+        bconf = bconf.permute(1, 0, 2, 3)
+        bnoised = bconf + (torch.rand_like(bconf) - 0.5) * (tau * 0.02)
+        
+        flatconf = bnoised.view(-1)
+        kblock = min(32, flatconf.shape[-1])
+        scores, indices = torch.topk(flatconf, k=kblock, dim=-1) 
+        
+        outcoords = indices % self.numouts
+        remainder = torch.div(indices, self.numouts, rounding_mode='floor')
+        vcoords = remainder % self.lvalue
+        global_in_coords = torch.div(remainder, self.lvalue, rounding_mode='floor') 
+        
+        expertcoords = kindicesflat.unsqueeze(-1).expand(2*B*T, kblock)
+        wtile = self.w[global_in_coords, expertcoords, vcoords, outcoords] 
+        conf_selected = torch.sigmoid(self.conf[global_in_coords, vcoords, outcoords])
+        
+        curscale = torch.exp(torch.clamp(conf_selected, -5.0, 5.0))
+        wscaled = wtile * (9.0 / (curscale + 1e-6)).unsqueeze(-1).unsqueeze(-1).to(dtype=target_dtype)
+        wqresidual = (-wscaled).detach() + wscaled
+        
+        x_expand_idx = global_in_coords.unsqueeze(-1).expand(2*B*T, kblock, self.block)
+        x_selected = torch.gather(x_global, dim=1, index=x_expand_idx)
+        x_selected = x_global[:, :, global_in_coords] 
+        ein = torch.einsum('btki, kio -> btko', x_selected, wqresidual)
+        ein = ein * scores.unsqueeze(0).unsqueeze(-1).to(dtype=target_dtype)
+        
+        accumflat = torch.zeros(B*T*2, self.numouts, self.block, device=x.device, dtype=target_dtype)
+        out_expand = outcoords.view(1, 1, kblock, 1).expand(B*T*2, kblock, self.block)
+        accumflat.scatter_add_(dim=1, index=out_expand, src=ein)
+        accumflat = accum.view(B*T, 2, -1)
+        accum = accumflat.sum(dim=1).view(B, T, -1)
+        
+        resa = torch.einsum('bti, ir -> btr', x, self.loraa.to(dtype=target_dtype))
+        if self.training:
+            resa = F.dropout(resa, p=0.1) * 0.9
+        loraout = torch.einsum('btr, ro -> bto', resa, self.lorab.to(dtype=target_dtype)) * self.scale
+        
+        return accum + loraout
+
+class mrrope(nn.Module):
+    def __init__(self,  emb=512, rdim=32):
+        super().__init__()
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, rdim, 2).float() / rdim))
+        t = torch.arange(emb).float()
+        freqs = torch.outer(t, inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos", emb.cos().view(1, emb, 1, rdim))
+        self.register_buffer("sin", emb.sin().view(1, emb, 1, rdim))
+    
+    def rotatehalf(self, x, c, s):
+        x1, x2 = x.chunk(2, dim=-1)
+        return torch.cat([x1 * c - x2 * s, x2 * c + x1 * s], dim=-1)
+    
+    def forward(self, q, k):
+        _, T, _, D = q.shape
+        cos = self.cos[:, :T, :, :D].to(q.dtype)
+        sin = self.sin[:, :T, :, :D].to(q.dtype)
+        c_chunk, _ = cos.chunk(2, dim=-1)
+        s_chunk, _ = sin.chunk(2, dim=-1)
+        return self.rotatehalf(q, c_chunk, s_chunk), self.rotatehalf(k, c_chunk, s_chunk)
+
+import math
+import torch.nn.functional as F
+class newmla(nn.Module):
+    def __init__(self, emb=512, experts=8, latent=64, rdim=32):
+        super().__init__()
+        self.experts = experts
+        self.hdim = emb // experts
+        self.rdim = rdim
+        self.fhead = experts * (self.hdim + self.rdim + self.hdim)
+        self.qhead = experts * (self.hdim + self.rdim)
+        self.norm = rms(emb)
+        self.kv_down = fsq(nn.Linear(emb, latent, bias=False))
+        self.kv_up = fsq(nn.Linear(latent, self.fhead, bias=False))
+        self.q_proj = fsq(nn.Linear(emb, self.qhead, bias=False))
+        gain = 1.0 / math.sqrt(2 * 8)
+        self.out_proj = fsq(nn.Linear(experts * self.hdim, emb, bias=False))
+        nn.init.xavier_uniform_(self.out_proj.weight, gain=gain)
+
+    def forward(self, x, rope_obj, fsq, tau):
+        latent = max(32, fsq // 4)
+        B, T, _ = x.shape
+        xq = self.norm(x, fsq)
+        kvlatent = self.kv_down(xq, tau=tau, outs=latent, ins=fsq)
+        kv = self.kv_up(kvlatent, tau=tau, outs=self.fhead, ins=latent)
+        kv = kv.view(B, T, self.experts, -1)
+        kcontent, kpe, v = torch.split(kv, [self.hdim, self.rdim, self.hdim], dim=-1)
+        
+        q = self.q_proj(xq, tau=tau, outs=self.qhead, ins=fsq)
+        q = q.view(B, T, self.experts, -1)
+        qcontent, qpe = torch.split(q, [self.hdim, self.rdim], dim=-1)
+        qpe, kpe = rope_obj(qpe, kpe)
+
+        q = torch.cat([qcontent, qpe], dim=-1).transpose(1, 2)
+        k = torch.cat([kcontent, kpe], dim=-1).transpose(1, 2)
+        v = v.transpose(1, 2)  
+        
+        dynamic_scale = 1.0 / math.sqrt(self.qhead)
+        q_scaled = q * dynamic_scale
+        out = F.scaled_dot_product_attention(q_scaled, k, v, is_causal=True, scale=1.0)
+        out = out.transpose(1, 2).reshape(B, T, self.hdim * self.experts)
+        out = self.out_proj(out, tau=tau, outs=fsq, ins=self.experts * self.hdim)
+        return x + out
+
+class moe(nn.Module):
+    def __init__(self, emb=512, experts=8):
+        super().__init__()
+        self.experts = experts
+        self.latent = emb // experts
+        self.wq = fsq2(experts=experts, in_features=emb, 
+                       out_features=self.latent)
+        self.wo = fsq2(experts=experts, in_features=self.latent, 
+                       out_features=emb)
+        self.norm = rms(emb)
+
+    def forward(self, x, route, fsq, tau):
+        B, T, C = x.shape
+        xflat = x.view(-1, C)
+        logits = route.view(-1, route.shape[-1])
+        noisy_logits = logits + torch.randn_like(logits) * (tau * 0.1)
+        kweights, kindices = torch.topk(noisy_logits, k=2, dim=-1)
+        gatescores = F.softmax(kweights, dim=-1)
+
+        norm = self.norm(xflat, fsq)
+        norm_x_expanded = norm.unsqueeze(1).expand(-1, 2, -1)
+        h = self.wq(norm_x_expanded, kindices, outs=self.latent, 
+                    ins=fsq, tau=tau)
+        h = h * gatescores.unsqueeze(-1)
+        out_slots = self.wo(h, kindices, outs=fsq, ins=self.latent, 
+                            tau=tau)
+
+        final_out = out_slots.sum(dim=1)
+        canvas = torch.zeros_like(xflat)
+        canvas = final_out
+        return x + canvas.view(B, T, C)
+
+class lnn(nn.Module):
+    def __init__(self, emb=512):
+        super().__init__()
+        self.dt = fsq(nn.Linear(emb * 2, emb, bias=False))
+
+    def forward(self, h, ccontext, tau, fsq):
+        combined = torch.cat([ccontext, h], dim=-1)
+        wqdt = self.dt(combined, tau, fsq, fsq*2)
+        dt = torch.sigmoid(wqdt)
+        lln = h + (-h + torch.tanh(ccontext)) * dt
+        return lln
+
+class swigluznn(nn.Module):
+    def __init__(self, emb=512):
+        super().__init__()
+        hiddendim = int(8/3 * emb)
+        self.wcombined = fsq(nn.Linear(emb, hiddendim * 2, bias=False))
+        self.wdown = fsq(nn.Linear(hiddendim, emb, bias=False))
+
+    def forward(self, x, tau, fsq):
+        activehidden = int(8*fsq) // 3
+        combined = self.wcombined(x, tau, fsq * 2, fsq)
+        newshape = list(combined.shape[:-1]) + [2, activehidden]
+        reshaped = combined.view(newshape)
+        gate, up = torch.unbind(reshaped, dim=-2)
+        hff = F.silu(gate) * up
+        wqdown = self.wdown(hff, tau, outs=fsq, ins=activehidden)
+        return x + wqdown
+
+class lru(nn.Module):
+    def __init__(self, emb=512, dstate=16, dtrank=16):
+        super().__init__()
+        self.emb = emb
+        self.dstate = dstate
+        self.dtrank = dtrank
+        self.conv = nn.Conv1d(emb, emb, kernel_size=4, stride=1, 
+                              padding=0, groups=emb)
+        self.xproj = fsq(nn.Linear(emb, dtrank + dstate * 2, bias=False))
+        self.dtproj = fsq(nn.Linear(dtrank, emb, bias=False))
+        self.Alog = nn.Parameter(torch.log(torch.arange(1, emb+1).float()))
+        self.norm = rms(emb)
+        nn.init.dirac_(self.conv.weight)
+        
+    def forward(self, x, nextstate, tau, fsq):
+        B, T, _ = x.shape
+        xflipped = x.transpose(1, 2)
+        xpadded = F.pad(xflipped, (3, 0))
+        xconv = self.conv(xpadded).transpose(1, 2)
+        xactive = F.silu(xconv)
+
+        xdb = self.xproj(xactive, tau, self.dtrank + self.dstate * 2, fsq)
+        dt, bval, cval = torch.split(xdb, [self.dtrank, self.dstate, self.dtrank], dim=-1)
+        dtlinear = self.dtproj(dt, tau, fsq, self.dtrank)
+        dt = F.softplus(dtlinear * (tau * 0.1))
+        alog = self.Alog[:fsq].float()
+        noise = (torch.rand_like(alog) - 0.5) * (tau * 0.02)
+        alog = alog + noise
+        a_log_sliced = torch.clamp(alog, min=-6.0, max=-0.5)
+        A = -torch.exp(a_log_sliced)
+
+        state = nextstate if nextstate is not None else torch.zeros(B, fsq, self.dstate, device=x.device, dtype=x.dtype)
+        if T > 1:
+            log_decay = dt * A.view(1, 1, -1) 
+            cum_decay = torch.cumsum(log_decay, dim=1)
+            cum_decay = torch.clamp(cum_decay, min=-50.0, max=50.0)
+
+            input = (xactive * dtlinear).unsqueeze(-1) * bval.unsqueeze(-2)
+            maxt = cum_decay.max(dim=1, keepdim=True)[0]
+            past = torch.exp(-(cum_decay - maxt)).unsqueeze(-1)
+            erasin = input * past
+            history = torch.cumsum(erasin, dim=1)
+            currj = torch.exp(cum_decay - maxt).unsqueeze(-1)
+            cheatstate = history * currj
+
+            state_effect = nextstate.unsqueeze(1) * torch.exp(cum_decay).unsqueeze(-1)
+            combinedstate = cheatstate + state_effect
+            laststate = combinedstate[:, -1].detach()
+            combinedstate = self.norm(combinedstate, fsq)
+            y = (combinedstate * (cval.unsqueeze(2))).sum(dim=-1)
+            return x + y, laststate
+        
+        else:
+            y_outlist = torch.zeros(B, T, fsq)
+            for t in range(T): 
+                dtsliced = dt[:, t, :fsq].unsqueeze(-1)    
+                bsliced = bval[:, t, :self.dstate].unsqueeze(-1)   
+                csliced = cval[:, t, :self.dstate].unsqueeze(-1)   
+                xsliced = xactive[:, t, :fsq].unsqueeze(-1)
+
+                justdecay = torch.exp(dtsliced * A.view(1, -1, 1))
+                justdecay = torch.clamp(justdecay, min=0.0, max=0.99)
+                input = (xsliced * dtsliced) @ bsliced.transpose(-1, -2)
+                oldmemory = state[:, :fsq, :]
+                usualstate = oldmemory * justdecay + input 
+                state[:, :fsq, :] = usualstate
+                norm = self.norm(usualstate)
+                y_t = torch.matmul(norm, csliced).squeeze(-1) 
+                y_outlist[:, t, :] = y_t
+                
+            final = x + y_outlist
+            return final, state
+
+class heads(nn.Module):
+    def __init__(self, emb=512, vocab=4096, spec=2):
+        super().__init__()
+        self.emb = emb
+        self.embed = nn.Embedding(vocab, emb)
+        self.spec = spec
+        self.normf = rms(emb)
+        self.normmtp = rms(emb)
+        self.gate = fsq(nn.Linear(emb, emb))
+        self.predstate = fsq(nn.Linear(emb, emb))
+        self.specchain = fsq2(nn.Parameter(torch.empty(spec, emb, emb)))
+
+    def chunk(self, x, weight, chunks):
+        vocabchunk = torch.chunk(weight, chunks, dim=0)
+        logits = [F.linear(x, wc) for wc in vocabchunk]
+        return (torch.cat(logits, dim=-1))
+    
+    def forward(self, hfinal, fourth, tau, fsq):
+        norm = self.normf(hfinal, fsq)
+        fourthnorm = self.normf(fourth, fsq)
+        wqgate = self.gate(norm, tau, fsq, fsq)
+        g = torch.sigmoid(wqgate)
+        ph = self.predstate(fourthnorm, tau, fsq, fsq)
+        currmtp = self.normmtp(fourthnorm + (ph * g), fsq)
+        logits = self.chunk(currmtp, self.embed.weight[:fsq])
+        logits = logits / (math.sqrt(fsq) / math.sqrt(self.emb))
+        logits = 10.0 * torch.tanh(logits / 10.0)
+        
+        wqspec = self.specchain(currmtp, tau, fsq, fsq)
+        nextstate = torch.tanh(wqspec)
+        currmtp = self.normmtp(nextstate, fsq)
+        steplogits = self.chunk(currmtp, self.embed.weight[:fsq])
+        steplogitsscaled = steplogits / (math.sqrt(fsq) / math.sqrt(self.emb))
+        clampedsteplog = torch.clamp(steplogitsscaled, -10.0, 10.0)
+        final = 10.0 * torch.tanh(clampedsteplog / 10.0)
+        return logits, final, ph, norm
+
+class layer(nn.Module):
+    def __init__(self, i, emb=512, experts=8):
+        super().__init__()
+        self.i = i
+        self.experts = experts
+        self.lnn = lnn(emb)
+        self.norm1 = rms(emb)
+        self.norm2 = rms(emb)
+        self.rope = mrrope(rdim=32)
+        
+        if i != 3 and i != 7:
+            self.isexpert = True
+            self.moe = moe(emb, experts)
+            self.router = nn.Linear(emb, experts, bias=False)
+            nn.init.orthogonal_(self.router.weight)
+        else:
+            self.isexpert = False
+            self.swigluznn = swigluznn(emb)
+            self.router = None
+
+        if i != 3 and i != 7:
+            self.isglobal = True
+            self.mla = newmla(emb)
+        else:
+            self.isglobal = False
+            self.lrussd = lru(emb)
+            
+    def forward(self, h, lrustate, tau, fsq):
+        rescale = (256.0 / fsq) * math.sqrt(2)
+        if self.isglobal:
+            hcontext = self.mla(h, self.rope, fsq, tau)
+            nextstate = None
+        else:
+            hcontext, nextstate = self.lrussd(h, tau, lrustate, fsq)
+        hcontext = 6.0 * torch.tanh(hcontext / 6.0)
+        hcontext = h + (hcontext * rescale)
+        norm1 = self.norm1(hcontext, fsq)
+
+        if self.isexpert:
+            router = self.router.weight[:self.experts, :fsq]
+            logits = torch.matmul(norm1, router.t())
+            logits = torch.clamp(logits, -8.0, 8.0)
+            combinedcontext, route = self.moe(norm1, logits, tau, fsq)
+        else:
+            combinedcontext = self.swigluznn(norm1, fsq, tau)
+            route = None
+        combinedcontext = torch.clamp(combinedcontext, -6.0, 6.0)
+        hffn = norm1 + (combinedcontext * rescale)
+        norm2 = self.norm2(hffn, fsq)
+
+        hliquid = self.lnn(norm1, norm2, tau, fsq)
+        l1 = hcontext + hliquid
+        return l1, nextstate, route
+
+import torch
+import torch.nn as nn
+
+class model(nn.Module):
+    def __init__(self, emb=512, vocab=4096, layers=24, perlayers=8, 
+                 block=32):
+        super().__init__()
+        self.blocks = block
+        self.vocab = vocab
+        self.emb = emb
+        self.perlayers = perlayers
+        self.lnum = layers // perlayers
+        self.embed = nn.Embedding(vocab, emb)
+        self.numinslist = []
+        current = emb
+        for i in range(self.lnum):
+            self.numinslist.append(current // block)
+            if i < self.lnum - 1:
+                current = (current // 2) + (current // 4)
+        totalins = sum(self.numinslist)
+        self.down = nn.Parameter(torch.zeros(emb, totalins))
+        with torch.no_grad():
+            self.down[:, :emb] = torch.eye(emb)
+            current_offset = emb
+            current = emb
+            for i in range(self.lnum - 1):
+                next_dim = (current // 2 + current // 4)
+                w_slice = torch.empty(emb, next_dim)
+                nn.init.kaiming_uniform_(w_slice)
+                self.down[:, current_offset : current_offset + next_dim] = w_slice
+                current_offset += next_dim
+                current = next_dim
+        self.w = nn.Parameter(torch.randn(self.lnum, perlayers, totalins, emb // block, block, block) * 0.02)
+        self.conf = nn.Parameter(torch.ones(self.lnum, perlayers, totalins, emb // block))
+        self.layer = nn.ModuleList([layer(i=i, emb=emb, experts=8) 
+                                    for i in range(layers)])
+
+    def forward(self, x, tau, fsq):
+        B, T = x.shape
+        h = self.embed(x)
+        for m in range(self.lnum):       
+            numb = self.emb // self.blocks
+            xblocked = h[:, :numb * self.blocks].view(B*T, numb, self.blocks)
+            bconf = torch.sigmoid(self.conf[m])
+            bnoised = bconf.unsqueeze(0)
+            flat_scores = bnoised.view(B*T, self.perlayers, -1)
+            K_curr = min(32, flat_scores.shape[-1])
+            scores, topk_indices = torch.topk(flat_scores, k=K_curr, dim=-1)
+            out_coords = torch.div(topk_indices, numb, rounding_mode='floor') 
+            in_coords = topk_indices % numb          
+            t_arr = torch.arange(B*T, device=x.device).unsqueeze(-1)
+            s_idx = torch.arange(B*T, device=x.device).view(B*T, 1, 1).expand(B*T, self.perlayers, K_curr)
+            l_idx = torch.arange(self.perlayers, device=x.device).view(1, self.perlayers, 1).expand(B*T, self.perlayers, K_curr)
+            
+            packed_w = self.w[m][l][l_idx, out_coords, in_coords]
+            fused_projections = torch.einsum('si, io -> so', xblocked, self.down[:, :sum(self.numinslist[:m+1])])
+            x_global = fused_projections.view(B*T, -1, self.blocks) 
+            
+            x_expand_idx = in_coords.unsqueeze(-1).expand(B*T, self.perlayers, K_curr, self.blocks)
+            packed_x = torch.gather(x_global.unsqueeze(1).expand(-1, self.perlayers, -1, -1), dim=2, index=x_expand_idx)
+            
+            expert_outputs = torch.einsum('slki, slkio -> slko', packed_x, packed_w)
+            gated_updates = expert_outputs * scores.unsqueeze(-1) 
+
+            for l in range(self.perlayers):
+                layeridx = m * self.perlayers + l
+                update_canvas = torch.zeros_like(xblocked)
+                update_canvas.index_put_((t_arr, out_coords), gated_updates, accumulate=True)
+                h = h.clone()
+                h[..., :numb * self.blocks] = h[..., :numb * self.blocks] + update_canvas.view(B, T, numb * self.blocks)
+                h = self.layer[layeridx](h, tau=tau, fsq=fsq)
+            if m < self.totallayers - 1:
+                next_dim = (h.shape[-1] // 2) + (h.shape[-1] // 4)
+                h = torch.einsum('bti, io -> bto', h, self.down[:, current_offset : current_offset + next_dim])
+                current_offset += next_dim
+        return h
+
+class generate(nn.Module):
+    def __init__(self, model, tokenizer, length, tmp, topk, penalty):
+        super().__init__()
+        self.model = model
+        self.tokenizer = tokenizer
+        self.length = length
+        self.tmp = max(tmp, 1e-6)
+        self.topk = topk
+        self.penalty = penalty
+
+    @torch.no_grad()
+    def forward(self, prompt, active4=512):
+        self.model.eval()
+        device = next(self.model.parameters()).device
+        input_ids = self.tokenizer.encode(prompt)
+        tokens = torch.tensor([input_ids], dtype=torch.long, device=device)
+        lru_state = [None] * len(self.model.layers)
+
+        vocab = getattr(self.model, 'vocab', None)
+        if vocab is None:
+            vocab = self.model.embed.num_embeddings
+
+        print('\nmodel: ', end='', flush=True)
+        history = []
+        pen_indices = torch.arange(16, device=device)
+        decay = torch.exp(-pen_indices / 3.0) * self.penalty
+
+        generatedcount = 0
+
+        while generatedcount < self.length:
+            out = self.model(tokens, lru_states=lru_state, active4=active4, training=False)
+            logits1 = out[0][:, -1, :]
+            spec_logits_list = out[1]
+            lru_state = out[4]
+
+            if len(history) > 0:
+                recent = min(16, len(history))
+                h_slice = torch.tensor(history[-recent:], device=device)
+                logits1[0].index_add_(0, h_slice, -decay[:recent])
+                long_len = min(192, len(history))
+                token_counts = torch.bincount(torch.tensor(history[-long_len:], dtype=torch.long, device=device), minlength=vocab)
+                logits1[0] -= (token_counts.float() ** 1.1) * 0.15
+
+            probs_check = F.softmax(logits1 / 2.0, dim=-1)
+            entropy = -torch.sum(probs_check * torch.log(probs_check + 1e-9))
+            dtmp = torch.clamp(self.tmp + (1.0 / (entropy + 0.5)), self.tmp, 1.5)
+            logits1 = logits1 / dtmp
+
+            top_v, _ = torch.topk(logits1, self.topk)
+            logits1[logits1 < top_v[:, [-1]]] = -65504.0
+
+            probs = F.softmax(logits1, dim=-1)
+            next_token_tensor = torch.multinomial(probs, num_samples=1)
+            next_token = next_token_tensor.item()
+
+            accepted_tokens = [next_token]
+            history.append(next_token)
+            print(self.tokenizer.decode([next_token]), end='', flush=True)
+
+            for future_logits in spec_logits_list:
+                if generatedcount >= self.length:
+                    break
+                f_logits = future_logits[:, -1, :]
+                f_probs = F.softmax(f_logits, dim=-1)
+                conf, best_token = torch.max(f_probs, dim=-1)
+                cost = 1.0 / (conf.item() + 1e-5)
+                if cost <= 2.0:
+                    t_idx = best_token.item()
+                    accepted_tokens.append(t_idx)
+                    history.append(t_idx)
+                    print(self.tokenizer.decode([t_idx]), end='', flush=True)
+                    generatedcount += 1
+                else:
+                    break
+
+            tokens = torch.tensor([[accepted_tokens]], dtype=torch.long, device=device)
+        return history
+
+import numpy as np
+import pickle
+import psutil
+import time
+import queue
+import gc
+from queue import Queue
+def debug(name, tensor): 
+    print(f'debug [{name}]: shape={list(tensor.shape)} | mean={tensor.mean().item():.4f}')
+
+def solidify(model):
+    print("\n-> SOLIDIFYING CORE: Migrating to INT8 for Ryzen 3...")
+    model.eval()
+    qmodel = torch.ao.quantization.quantize_dynamic(
+        model, {nn.Linear}, dtype=torch.qint8)
+    return qmodel
+
+INITIALLOSS = None
+HISTORY = []
+def print_sovereign_report(step, loss, experts_usage, accum):
+    global INITIALLOSS, HISTORY
+    mem = psutil.virtual_memory().percent
+    HISTORY.append(loss)
+    if INITIALLOSS is None:
+        INITIALLOSS = loss
+    if len(HISTORY) > 100:
+        HISTORY.pop(0)
+    std = np.std(HISTORY) if len(HISTORY) > 1 else 0
+    if torch.is_tensor(experts_usage):
+        usage_tensor = experts_usage.detach().float()
+    else:
+        usage_tensor = torch.tensor(experts_usage, dtype=torch.float32)
+    total_tokens = usage_tensor.sum()
+    if total_tokens > 0:
+        probs = (usage_tensor / total_tokens).numpy()
+    else:
+        probs = np.ones(len(experts_usage)) / len(experts_usage)
+    probs = np.clip(probs, 1e-7, 1.0)
+    entropy = -np.sum(probs * np.log(probs))
+    if len(HISTORY) >= 20:
+        start_avg = np.mean(HISTORY[:10])
+        end_avg = np.mean(HISTORY[-10:])
+        delta = start_avg - end_avg
+    else:
+        delta = INITIALLOSS - loss
+    if step % accum == 0:
+        np_usage = usage_tensor.cpu().numpy()
+        print(f"\n--- SOVEREIGN PERFORMANCE REPORT ---")
+        print(f"Step: {step} | Loss: {loss:.4f} | RAM: {mem}")
+        print(f"Stability (STD): {std:.4f} | Velocity (Delta): {delta:.4f}")
+        print(f"Expert Diversity (Entropy): {entropy:.4f}")
+        print(f'Expert Spread (STD): {np.std(np_usage):.2f}')
+        print(f"Hardware Status: Stable (Ryzen 3 Optimized)")
+        print(f"------------------------------------\n")
+
+def loadbalance(routes, experts, training=False):
+    valid_tensors = []
+    for r in routes:
+        if r is not None and torch.is_tensor(r):
+            if r.dim() >= 2 and r.shape[-1] == experts:
+                valid_tensors.append(r.view(-1, experts))
+            elif r.dim() == 1 and r.numel() % experts == 0 and r.numel() > 0:
+                valid_tensors.append(r.view(-1, experts))
+                
+    allroutes = torch.cat(valid_tensors, dim=0)
+    importance = allroutes.mean(dim=0)
+    
+    if training:
+        load = allroutes.mean(dim=0)
+    else:
+        indices = torch.argmax(allroutes, dim=-1)
+        load = torch.zeros(experts, device=allroutes.device)
+        load.scatter_add_(0, indices, torch.ones_like(indices, dtype=torch.float))
+        load = load / (load.sum() + 1e-9)
+        
+    loss = experts * torch.sum(importance * load)
+    with torch.no_grad():
+        telemetry_load = (allroutes.mean(dim=0) if training else load).detach().cpu().numpy() * 100.0
+    return loss, telemetry_load
+
+tokenizer = bpe(4096)
+def love(tokenizer_instance, path, save_path, rules):
+    if not os.path.exists(rules):
+        with open(path, "r", encoding="utf-8") as f:
+            sample_text = f.read(50 * 1024 * 1024).lower() 
+        tokenizer_instance.train(sample_text)
+        with open(rules, 'wb') as f:
+            pickle.dump(tokenizer_instance, f)
+    else:
+        with open(rules, 'rb') as f:
+            tokenizer_instance = pickle.load(f)
+    bin_temp = save_path.replace(".npy", ".bin")
+    print(f"Streaming {os.path.basename(path)} to disk (1MB chunks)...")
+    with open(path, "r", encoding="utf-8") as f_in, open(bin_temp, "wb") as f_out:
+        while True:
+            chunk = f_in.read(50 * 1024 * 1024) 
+            if not chunk:
+                break
+            encoded_list = tokenizer_instance.encode(chunk.lower())
+            tokens = np.array(encoded_list, dtype=np.uint16)
+            tokens.tofile(f_out)
+            del encoded_list
+            del tokens
+
+    raw_data = np.fromfile(bin_temp, dtype=np.uint16)
+    np.save(save_path, raw_data)
+    if os.path.exists(bin_temp):
+        os.remove(bin_temp)
+    print(f"\n[SAVED] {save_path}")
+    del raw_data
+    gc.collect()
+    return tokenizer_instance
+
+train_maps = {
+    'tiny': np.load('C:\\Users\\user\\Downloads\\tokenized_data3.npy', mmap_mode='r'),
+    'openweb': np.load('C:\\Users\\user\\Downloads\\tokenized_data1.npy', mmap_mode='r'),
+    'wiki': np.load('C:\\Users\\user\\Downloads\\tokenized_data2.npy', mmap_mode='r')
+}
+
+VAL_SPLIT_SIZES = {
+    'tiny': 18000000,
+    'openweb': 18000000,
+    'wiki': 5000000
+}
+
+def get_batch(split='train', blocksize=192, batchsize=1):
+    data_dict = train_maps if split == 'train' else VAL_SPLIT_SIZES
+    x_batch = torch.zeros((batchsize, blocksize), dtype=torch.long, device='cpu')
+    y_batch = torch.zeros((batchsize, blocksize), dtype=torch.long, device='cpu')
+    y2_batch = torch.zeros((batchsize, blocksize), dtype=torch.long, device='cpu')
+    for i in range(batchsize):
+        r = np.random.random()
+        if r < 0.50:
+            data = data_dict['tiny']
+            val = VAL_SPLIT_SIZES['tiny']
+        elif r < 0.80:
+            data = data_dict['openweb']
+            val = VAL_SPLIT_SIZES['openweb']
+        else:
+            data = data_dict['wiki']
+            val = VAL_SPLIT_SIZES['wiki']
+        if split == 'train':
+            start_idx = 0
+            end_idx = len(data) - val - blocksize - 5
+        else:
+            start_idx = len(data) - val
+            end_idx = len(data) - blocksize - 5
+        ix = np.random.randint(start_idx, end_idx)
+        raw = torch.from_numpy(data[ix:ix+blocksize+5].astype(np.int64)).to('cpu')
+        x_batch[i] = raw[:blocksize]
+        y_batch[i] = raw[1:blocksize+1]
+        y2_batch[i] = raw[2:blocksize+2]
+    return x_batch, y_batch, y2_batch
+
+def val(model, batch, block, iters, device, tau=1.0, fsq=None):
+    model.eval()
+    with torch.no_grad():
+        losses = torch.zeros(iters, device='cpu')
+        print(f'-> VALIDATING: Sampling {iters} batches...')
+
+        for k in range(iters):
+            vxb, vyb1, _ = get_batch(split='val', blocksize=block, batchsize=batch)
+            vxb = vxb.to(device)
+            vyb1 = vyb1.to(device)
+            l1, _, _, _, _, _ = model(vxb, tau=tau, fsq=(fsq or 64), training=False)
+            loss = F.cross_entropy(l1.reshape(-1, 4096), vyb1.reshape(-1))
+            losses[k] = loss.detach().float().cpu().item()
+            del vxb, vyb1
+
+    model.train()
+    return losses.mean()
+
+data_queue = Queue(maxsize=2) 
+def loader_thread(block, batch, stop_event):
+    while not stop_event.is_set():
+        try:
+            x, y1, y2 = get_batch(split='train', blocksize=block, batchsize=batch)
+            data_queue.put((x, y1, y2), block=True, timeout=1.0)
+        except queue.Full:
+            continue
+
+import random
+from threading import Thread
+stop_event = Thread.Event
+t = Thread(target=loader_thread, args=(block, batch, stop_event), daemon=True)
+t.start()
+expert_usage_history = []
+
+newi = 1
+total_loss = 0.0
+timenew = 0.0
+for i in range(start_step, steps):
+    step_start = time.time()
+
+    if i < warmup:
+        curr_lr = baselr * (i / warmup)
+        curr_tau = inittau - (inittau - mintau) * (i / warmup)
+    else:
+        progress = (i - warmup) / (steps - warmup)
+        curr_lr = minlr + 0.5 * (baselr - minlr) * (1 + np.cos(np.pi * progress))
+        curr_tau = mintau
+    
+    optimizer.param_groups[0]['lr'] = curr_lr
+    optimizer.param_groups[1]['lr'] = curr_lr * 0.5
+    optimizer.param_groups[2]['lr'] = curr_lr * 0.5
+    optimizer.param_groups[3]['lr'] = curr_lr * 0.5
+    optimizer.param_groups[4]['lr'] = curr_lr
+
+    batch_raw = data_queue.get()
+    xb = batch_raw[0].to('cpu', non_blocking=True)
+    yb1 = batch_raw[1].to('cpu', non_blocking=True)
+    yb2 = batch_raw[2].to('cpu', non_blocking=True)
+    
+    scales = [64, 128, 256, 384, 512]
+    if i > 0:
+        def curriculum(step, max=512):
+            if step < 1000:
+                return 64
+            elif step < 3000:
+                return 128
+            elif step < 6000:
+                return 256
+            elif step < 9000:
+                return 384
+            else: 
+                return max
+            
+        with torch.no_grad():
+            clean_router_tensors = [r for r in routes if r is not None and r.numel() > 0]
+            all_routes = torch.cat([r.flatten() for r in clean_router_tensors])
+            router_probs = F.softmax(all_routes, dim=-1)
+            max_prob = all_routes.max(dim=-1)[0].mean()
+
+        if max_prob > 0.85:
+            active = 64  
+        elif max_prob > 0.60:
+            active = 128  
+        elif max_prob > 0.45:
+            active = 256
+        elif max_prob > 0.30:
+            active = 384
+        else:
+            active = 512
+
+        max_allowed_width = curriculum(i)
+        active = min(active, max_allowed_width)
+        if random.random() > 0.90:
+            active = random.choice([s for s in scales if s <= max_allowed_width])
+    else:
+        active = 64
+
+    def bucket(active4_tensor):
+        buckets = (torch.tensor([64, 128, 256, 384, 512], dtype=torch.long))
+        idx = torch.searchsorted(buckets, active4_tensor)
+        idx = torch.clamp(idx, max=len(buckets) - 1)
+        return buckets[idx]
+    
+    accumloss = 0.0
+    active4_tensor = bucket(active)
+    mdim = active4_tensor.detach()
+    tautensor = torch.tensor(curr_tau, dtype=torch.float32)
+    l1, spec_chain, ph, hf, _, routes = gpt(xb, tau=tautensor, active4=mdim, step=i, training=True)
+    
+    loss_t1 = F.cross_entropy(l1.reshape(-1, 4096), yb1.reshape(-1), label_smoothing=0.1)
+    if torch.isnan(loss_t1) or torch.isinf(loss_t1):
+        del l1, spec_chain, ph, hf, loss_t1
+        print(f'!!! Scale {mdim} exploded! Skipping...')
+        continue
+    accumloss = accumloss + loss_t1
+    print(f"Logit Mean: {loss_t1.mean().item():.4f} | Std: {loss_t1.std().item():.4f}")
+
+    if spec_chain:
+        for idx, slogits in enumerate(spec_chain):
+            specloss = F.cross_entropy(slogits.reshape(-1, vocab), yb2[:, :l1.size(1)].reshape(-1))
+            accumloss = accumloss + (0.5 * specloss)
+
+    current_balance = np.zeros(experts)
+    if i > 0 and routes is not None:
+        clean_router_tensors = [r for r in routes if r is not None and r.numel() > 0]
+        if len(clean_router_tensors) > 0:
+            aux_loss, current_balance = loadbalance(clean_router_tensors, experts=4, training=True)
+            z_loss = torch.logsumexp(router_probs.clamp_min(1e-9).log(), dim=-1).pow(2).mean()
+            accumloss = accumloss + (0.1 * aux_loss + 0.05 * z_loss)
+    
+    forloss = accumloss / accum
+    forloss.backward()     
+    total_loss += accumloss.item() 
+    del l1, spec_chain, ph, hf, loss_t1, forloss, accumloss
+    timediff = (time.time() - step_start) - timenew
+    
+    if (i + 1) % accum == 0:
+        valid_gradients = True
+        for param in gpt.parameters():
+            if param.grad is not None:
+                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                    valid_gradients = False
+                    break
+
+        torch.nn.utils.clip_grad_value_(gpt.parameters(), clip_value=0.5)
+        torch.nn.utils.clip_grad_norm_(gpt.parameters(), max_norm=1.0)
+        if valid_gradients == True:
+            optimizer.step()
+
+        with torch.no_grad():
+            if routes is not None:
+                clean_router_tensors = [r for r in routes if r is not None and r.numel() > 0]
+                
+                if len(clean_router_tensors) > 0:
+                    all_probs_tensor = torch.stack(clean_router_tensors)
+                    avg_usage = all_probs_tensor.mean(dim=0)
+                    if avg_usage.dim() > 1:
+                        avg_usage = avg_usage.mean(dim=list(range(avg_usage.dim() - 1)))
+                    elif avg_usage.dim() == 0:
+                        avg_usage = avg_usage.unsqueeze(0)
+                    kick_threshold = (1.0 / 8) * 0.10
+                    
+                    for idx, usage in enumerate(avg_usage):
+                        usage_val = usage.item() if isinstance(usage, torch.Tensor) else usage
+                        if usage_val < kick_threshold:
+                                print(f"⚠️ Expert {idx} usage fell below threshold ({usage_val:.4f}). Perturbing weights...")
+                                for name, p in gpt.named_parameters():
+                                    if f'w_q.{idx}' in name or f'w_o.{idx}' in name:
+                                        p.add_(torch.randn_like(p) * 0.001)
+                                            
+                else:
+                    non_none_routes = [r for r in routes if r is not None]
+                    print(f"⚠️ Warning: No valid router tensors matched criteria!")
+                    if non_none_routes:
+                        print(f"Actual shape of first non-None router output: {non_none_routes[0].shape}")
+                        print(f"Target 'experts' count: {experts}")
+                    else:
+                        print("The 'routes' list is completely full of None elements.")
+                if (i + 1) % accum == 0:
+                    for idx, usage in enumerate(avg_usage):
+                        status = 'Active'
+                        if usage < (1.0 / experts) * 0.1:
+                            status = "IDLE (STARVING)"
+                            print('adding 0.001')
+                        elif usage > (1.0 / experts) * 1.5:
+                            status = 'OVERLOADED'
+                        print(f"Expert {idx}: [{status}] | Load: {usage:.2%} ")
+
+        with torch.no_grad():
+            for name, param in gpt.named_parameters():
+                if param.requires_grad:
+                    has_grad = param.grad is not None
+                    if not has_grad:
+                        if i > 25:
+                            print(f"!!! CRITICAL: NO GRADIENTS in {name}")
+                if 'router' in name and param.grad is not None:
+                    if param.grad is not None:
+                        gnorm = torch.norm(param.grad).item()
+                        if gnorm > 10.0:
+                            print(f"!!! ROUTER UNSTABLE: {name} | Grad {gnorm:.2f} | Scaling...")
+                if any(k in name for k in ['expert', 'router', 'A_log']):
+                    norm = torch.norm(param).item()
+                    if norm < 1e-3:
+                        print(f"!!! COLLAPSE: {name}")
+                        if 'router' not in name:
+                            print(f"!!! COLLAPSE: {name} | Resetting parameters...")
+                            param.data.normal_(mean=0.0, std=0.02)
+                if 'A_log' in name and param.max() > -0.5:
+                    print(f"🛡️ [LRU SHIELD] Clamping unstable memory states in {name} (Max was: {param.max().item():.4f})")
+                    param.clamp_(max=-0.7)
+                if torch.isnan(param).any():
+                    print(f"NAN DETECTED IN: {name}")
+                    param.data.fill_(0.01)
+
+    with torch.no_grad():
+        gpt.eval()
+        if i <= 25:
+            clean_router_tensors = [r for r in routes if r is not None and r.numel() > 0]
+            usage = clean_router_tensors[-1].cpu().float().numpy() if len(clean_router_tensors) > 0 else np.zeros(experts)
+        usageloss = total_loss / newi
+        if i <= 25:
+            print_sovereign_report(i, usageloss, usage, accum)
+        else:
+            print_sovereign_report(i, usageloss, current_balance, accum)
+
+        if (i + 1) % 8000 == 0 and i > start_step:
+            elapsed = time.time() - start_time
+            steps_done = i - start_step
+            if steps_done > 0:
+                sec_per_step = elapsed / steps_done
+                remaining_steps = steps - i
+                remaining_min = (remaining_steps * sec_per_step) / 60
+                minutes = elapsed / 60
+                print(f"\nGone Minutes: {minutes if minutes < 60 else minutes/60}")
+                print(f"\nPROGRESS: {i}/{steps} | Speed: {sec_per_step:.1f}s/step")
+                print(f"EST. REMAINING: {remaining_min:.1f} minutes ({remaining_min/60:.1f} hours)")
+
+            val_loss = val(gpt, batch, block, batch, device)
+            print(f'Val Loss {val_loss:.4f}')
+
+            temp_path = checkpoint_path + ".tmp"
+            checkpoint_model = gpt._orig_mod if hasattr(gpt, '_orig_mod') else gpt
+            torch.save({
+                'step': i,
+                'model_state_dict': checkpoint_model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'accumloss': total_loss / 800,
+            }, temp_path)
+            os.replace(temp_path, checkpoint_path) 
+            print(f"CORE BACKUP SAVED.")
+            torch._dynamo.reset()
+            ram_p = psutil.virtual_memory().percent
+            if ram_p > 90:
+                print(">>> [THERMAL GUARD] Cooling 10s")
+                time.sleep(10)
+                start_time += 10
+        newi += 1
+        if i % 800 == 0:
+            total_loss = 0.0
+            newi = 1
+        
+    gc.collect()
+    optimizer.zero_grad(set_to_none=True)
+
+print("\n--- TRAINING COMPLETE ---")
+actionf = input("Command: [quantize] model or just [q]uit? ").lower()
+if actionf == 'quantize':
+    if os.path.exists(checkpoint_path):
+        qmodel = solidify(gpt._orig_mod if hasattr(gpt, '_orig_mod') else gpt)
+        torch.save(qmodel.state_dict(), "C:\\Users\\user\\Downloads\\sovereign_quantized.pt")
+        print("-> quantized and saved as 'sovereign_quantized.pt'")
+elif actionf == 'q':
+    print('-> Just Quited')
