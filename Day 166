@@ -1,0 +1,138 @@
+So lets assess again where we left: we have advanced architecture where we use linspaces, 
+physics such as sobolev helicity poly (spinors before but they turned out to be of no use as
+we // blocks now and use cos / sin so...) and use that for one united param then we only fmm
++ einsum between rfft and irfft there. but the thing is now with all versions ive done there
+is only one problem: i dont really understand where to use what... like i dont see whether for
+computation speed lie algebra vs fmm or both or i register my filters as buffers, but that 
+constraints them... and so on and on. i can solve that but that would take at least several
+days so i'll pass right now. instead i'll dig deeper into the physics and implementation: 
+imagine what is complex num? essentially it's just computations made around / in the sphere.
+that is usually we use for that lie algebra or fmm to do it in tangent space (linear space 
+touching the sphere and that means gaining its properties and affecting the sphere itself).
+but tangent is not really good as it makes us to go from sphere to tangent vice versa again
+and again. but what if we dont? there are different ways to work with sphere: outside of it, on 
+its surface, like most are done (through tangent) so that there is amplitude balance and sphere
+doesnt collapse. there is inside like wirtinger gates etc but there is just a couple of them and
+often unstable. so what if we think about how they work with each other? all these things that
+happen in / out side of the sphere are done with multipliers (sobolev, dt etc) and this is done
+through matrixes But what if we use them to Make the sphere? what if then through e.g. star 
+product we dont just make matrix but use its properties as functions? nad now we dont have 
+arrays of e.g. 3 dim x y z but rather functions (matrixes) X Y Z. and so i have thought about it
+and well... all things that we are doing are ALREADY properties of the sphere arent they? time,
+decay, phases? and so we dont need them do we? and so there a lot of problems we face like star
+product infinite thing but we can use complex stereorahpic coordinates ('exponential trick') 
+then we collapse to exponential differential operator (Voros Star Product) + obviously instead
+of integrals we use exp (so it doesnt blow up like true calculations) + there is a problem that
+it makes space connected everywhere (and so it echoes micro and macro) but what if it's okay? 
+like it should? it helps us rather than hinder. and also we can go to discrete steps rather than
+exp(z z) instead of blending everything together, cant we? + time is part of euler complex nums.
+so it solves any problems with unstability or echo. also phermions are great because they save
+our physics but they are rigid but what if instead of 1 - -1 we make a spectrum of 0 emb to full
+emb where every emb value has its own size then everything is mapped to 1 and conserved! and 
+well here is the last code: 
+
+import torch
+import torch.nn as nn
+import math
+
+class TrueFuzzyUniverse3D(nn.Module):
+    def __init__(self, N=512, device='cpu', K=32, ):
+        super().__init__()
+        self.N = N
+        self.device = device
+        self.K = K
+        self.B = N // K
+        
+        # Логарифмический спектр (Метрика нечеткого пространства)
+        log_spectrum = torch.logspace(start=0, end=-1, steps=K, base=10.0, device=device)
+        std_matrix = log_spectrum.unsqueeze(1) * log_spectrum.unsqueeze(0)
+        self.register_buffer('space_metric', std_matrix.unsqueeze(0).repeat(self.B, 1, 1))
+        
+        # Увеличиваем начальный масштаб весов, чтобы вывести систему из сонного состояния (плато)
+        self.X_raw = nn.Parameter(torch.randn(self.B, self.K, self.K, dtype=torch.complex64, device=device) * 0.1)
+        self.Y_raw = nn.Parameter(torch.randn(self.B, self.K, self.K, dtype=torch.complex64, device=device) * 0.1)
+        self.Z_raw = nn.Parameter(torch.randn(self.B, self.K, self.K, dtype=torch.complex64, device=device) * 0.1)
+
+    def forward(self, input_angles, num_layers=4, dt=0.2):
+        # Инициализируем состояние как чистую диагональную матрицу фаз
+        # Теперь входные данные явно присутствуют на диагонали с самого начала!
+        state = torch.diag(torch.exp(1j * input_angles))
+
+        diag_phases = torch.exp(1j * input_angles).view(self.B, self.K)
+        block_state = torch.diagonal_scatter(
+            torch.zeros(self.B, self.K, self.K, dtype=torch.complex64, device=self.device),
+            diag_phases, dim1=-2, dim2=-1
+        )
+        
+        # Одеваем наши квантовые координаты в лог-метрику и делаем Эрмитовыми
+        X = (self.X_raw + self.X_raw.conj().transpose(-2, -1)) * self.space_metric
+        Y = (self.Y_raw + self.Y_raw.conj().transpose(-2, -1)) * self.space_metric
+        Z = (self.Z_raw + self.Z_raw.conj().transpose(-2, -1)) * self.space_metric
+        
+        for _ in range(num_layers):
+            # Квантовые коммутаторы (вихревое некоммутативное смешивание)
+            G = (torch.bmm(X, block_state) - torch.bmm(block_state, X)) + \
+                (torch.bmm(Y, block_state) - torch.bmm(block_state, Y)) + \
+                (torch.bmm(Z, block_state) - torch.bmm(block_state, Z))
+            
+            G = -1j * G
+            G = 0.5 * (G + G.conj().transpose(-2, -1))
+
+            # Самый быстрый способ посчитать экспоненту / Кэли "в один клик"
+            L, V = torch.linalg.eigh(G)  # Разложение: L - вектор [N], V - матрица [N, N]
+
+            # Теперь экспонента от вектора L берется мгновенно (как LUT):
+            L_exp = torch.exp(1j * dt * L)  # Векторная операция O(N)
+
+            # Собираем унитарную матрицу обратно за два быстрых умножения O(N^3):
+            U = torch.bmm(V * L_exp.unsqueeze(-2), V.conj().transpose(-2, -1))
+            state = torch.bmm(U, block_state)
+            
+        blended_blocks = state.mean(dim=-1)
+        blended = blended_blocks.flatten()
+        eps = 1e-8
+        out_trig = blended / (torch.abs(blended) + eps)
+
+        return out_trig
+
+# =====================================================================
+# ТЕСТ ОБУЧЕНИЯ (ПРОВЕРКА СХОДИМОСТИ)
+# =====================================================================
+if __name__ == "__main__":
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    N_SIZE = 512
+    K_SIZE = 32
+    T_SIZE = ((2*math.pi*math.sqrt(3)) / math.log(10)*4) / math.sqrt(N_SIZE)
+    L_SIZE = 4
+    dt = T_SIZE / L_SIZE
+    model = TrueFuzzyUniverse3D(N=N_SIZE, K=K_SIZE, device=device)
+    
+    # Используем AdamW с чуть более высоким шагом (lr=0.02) для быстрого выхода из плато
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.003, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+
+    any_raw_data = torch.randn(N_SIZE, device=device) 
+    input_angles = torch.tanh(any_raw_data) * 3.14159
+    
+    target_angles = -1.0 * input_angles
+    target_complex = torch.exp(1j * target_angles)
+
+    print("--- СТАРТ УСПЕШНОГО ОБУЧЕНИЯ ГЕОМЕТРИИ ---")
+    
+    for epoch in range(1000):
+        predicted_complex = model(input_angles, num_layers=L_SIZE, dt=dt)
+        
+        # Комплексный Евклидов лосс
+        loss = torch.mean(torch.abs(predicted_complex - target_complex) ** 2)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        
+        # Зажим градиентов для защиты стабильности экспоненты
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        optimizer.step()
+        scheduler.step(loss.item())
+
+        if (epoch + 1) % 5 == 0 or epoch == 0:
+            print(f"Эпоха {epoch+1:02d} | Комплексный Loss = {loss.item():.6f}")
